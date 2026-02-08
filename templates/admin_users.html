@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Manage Users | Citywide Logistics</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div class="bg-grid"></div>
+  <div class="bg-glow glow-a"></div>
+  <div class="bg-glow glow-b"></div>
+
+  <header class="site-header">
+    <div class="brand">
+      <div class="brand-mark"></div>
+      <div>
+        <div class="brand-title">Citywide Logistics</div>
+        <div class="brand-subtitle">Admin Console</div>
+      </div>
+    </div>
+    <nav class="site-nav">
+      <a href="/">Planner</a>
+      <a href="/admin">Manager/Admin Home</a>
+      <a href="/logout">Logout</a>
+    </nav>
+  </header>
+
+  <main class="shell">
+    <section class="dashboard">
+      <div class="card">
+        <div class="card-header">
+          <div>
+            <h2>Create User</h2>
+            <p class="card-subtitle">Admin-only user management.</p>
+          </div>
+          <span class="pill">Admin</span>
+        </div>
+        {% if error %}
+          <div class="helper" role="alert">Error: {{ error }}</div>
+        {% endif %}
+        <form method="post" action="/admin/users/create" autocomplete="on">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+          <label for="createUserName">Name</label>
+          <input id="createUserName" name="name" placeholder="e.g., Alex Johnson" autocomplete="name" />
+
+          <label for="createUserEmail">Email</label>
+          <input id="createUserEmail" name="email" type="email" placeholder="name@company.com" autocomplete="email" required />
+
+          <label for="createUserPassword">Password</label>
+          <input id="createUserPassword" name="password" type="password" required autocomplete="new-password" />
+
+          <label for="createUserRole">Role</label>
+          <select id="createUserRole" name="role">
+            {% for r in roles %}
+              <option value="{{ r }}" {% if r == 'coordinator' %}selected{% endif %}>{{ r|capitalize }}</option>
+            {% endfor %}
+          </select>
+
+          <label>
+            <input type="checkbox" name="active" value="1" checked />
+            Active
+          </label>
+
+          <div class="form-actions">
+            <button class="btn btn-primary icon-only" type="submit" title="Create User" aria-label="Create User">
+              <span class="btn-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24">
+                  <path d="M12 5v14" />
+                  <path d="M5 12h14" />
+                </svg>
+              </span>
+              <span class="sr-only">Create User</span>
+            </button>
+          </div>
+          <div class="helper">Passwords are stored securely.</div>
+        </form>
+      </div>
+
+      <div class="card card-scroll">
+        <div class="card-header">
+          <div>
+            <h2>Users</h2>
+            <p class="card-subtitle">Update roles, activation, or reset passwords.</p>
+          </div>
+        </div>
+        <div class="table-wrap table-full">
+          {% if users %}
+            <table data-sortable="true" data-responsive="true">
+              <thead>
+                <tr>
+                  <th class="sortable" data-type="text">Name</th>
+                  <th class="sortable" data-type="text">Email</th>
+                  <th class="sortable" data-type="text">Role</th>
+                  <th class="sortable" data-type="text">Active</th>
+                  <th>Password Reset</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for u in users %}
+                  {% set current_role = (u.role or 'coordinator') %}
+                  <tr>
+                    <td data-label="Name">
+                      <input name="name" form="user-form-{{ u.record_id }}" value="{{ u.name or '' }}" placeholder="{{ u.display_name }}" />
+                    </td>
+                    <td data-label="Email">{{ u.email }}</td>
+                    <td data-label="Role">
+                      <select name="role" form="user-form-{{ u.record_id }}">
+                        {% for r in roles %}
+                          <option value="{{ r }}" {% if r == current_role %}selected{% endif %}>{{ r|capitalize }}</option>
+                        {% endfor %}
+                      </select>
+                    </td>
+                    <td data-label="Active">
+                      <input type="checkbox" name="active" value="1" form="user-form-{{ u.record_id }}" {% if u.active %}checked{% endif %} />
+                    </td>
+                    <td data-label="Password Reset">
+                      <input type="password" name="password" form="user-form-{{ u.record_id }}" placeholder="New password" autocomplete="new-password" />
+                    </td>
+                    <td data-label="Actions">
+                      <button class="btn btn-secondary icon-only" type="submit" form="user-form-{{ u.record_id }}" title="Save" aria-label="Save">
+                        <span class="btn-icon" aria-hidden="true">
+                          <svg viewBox="0 0 24 24">
+                            <path d="M20 6L9 17l-5-5" />
+                          </svg>
+                        </span>
+                        <span class="sr-only">Save</span>
+                      </button>
+                    </td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          {% else %}
+            <div class="empty-state">No users found.</div>
+          {% endif %}
+        </div>
+      </div>
+    </section>
+  </main>
+
+  {% for u in users %}
+    <form id="user-form-{{ u.record_id }}" method="post" action="/admin/users/{{ u.record_id }}/update">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+      <input type="hidden" name="next" value="/admin/users" />
+    </form>
+  {% endfor %}
+
+  <footer class="site-footer">
+    <div>Citywide Logistics Planner</div>
+    <div>Internal admin tools</div>
+  </footer>
+
+  <script>
+    window.USER_ROLE = "{{ user.role }}";
+  </script>
+  <script src="/static/app.core.js?v=20260205_1" defer></script>
+  <script src="/static/app.js?v=20260205_1" defer></script>
+</body>
+</html>

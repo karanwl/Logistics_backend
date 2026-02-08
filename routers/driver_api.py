@@ -1,0 +1,429 @@
+import json
+import logging
+import os
+import uuid
+from datetime import datetime, timezone
+
+from fastapi import APIRouter, HTTPException, UploadFile, File
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
+from starlette.requests import Request
+
+from auth import clear_session, issue_session, verify_password, get_user_from_token, maybe_upgrade_password
+from config import settings
+from services import DatabaseService
+from utils import business_date_iso, next_plan_date_iso
+
+
+router = APIRouter(prefix="/api/driver", tags=["driver"])
+logger = logging.getLogger(__name__)
+
+
+def _redact_user_record(rec: dict | None) -> dict | None:
+    if not rec:
+        return rec
+    fields = dict(rec.get("fields", {}) or {})
+    if settings.USERS_PASSWORD_FIELD in fields:
+        fields[settings.USERS_PASSWORD_FIELD] = "<redacted>"
+    return {"id": rec.get("id"), "fields": fields}
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _parse_iso(val: str | None) -> datetime | None:
+    if not val:
+        return None
+    try:
+        return datetime.fromisoformat(str(val).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _business_date(offset_days: int = 0) -> str:
+    return business_date_iso(offset_days=offset_days)
+
+
+def _next_plan_date() -> str:
+    return next_plan_date_iso(logger=logger)
+
+
+def _normalize_name(value: str | None) -> str:
+    return str(value or "").strip().lower()
+
+
+def _get_bearer_token(request: Request) -> str:
+    auth = request.headers.get("Authorization", "")
+    if not auth:
+        return ""
+    lower = auth.lower()
+    if lower.startswith("bearer "):
+        return auth[7:].strip()
+    if lower.startswith("token "):
+        return auth[6:].strip()
+    return ""
+
+
+def _get_current_user_api(request: Request):
+    token = _get_bearer_token(request) or request.cookies.get(settings.AUTH_COOKIE_NAME)
+    if not token:
+        return None
+    return get_user_from_token(token)
+
+
+def _role_allows_driver(role: str | None) -> bool:
+    role_norm = _normalize_name(role)
+    driver_role = _normalize_name(settings.DRIVERS_ROLE_VALUE or "driver")
+    return role_norm in {driver_role, "driver", "manager", "admin"}
+
+
+def _require_driver(request: Request):
+    user = _get_current_user_api(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Authentication required.")
+    if not _role_allows_driver(user.get("role")):
+        raise HTTPException(status_code=403, detail="Driver access required.")
+    return user
+
+
+def _parse_json(val: str | None, default):
+    try:
+        return json.loads(val) if val else default
+    except Exception:
+        return default
+
+
+def _load_published_plan(svc: DatabaseService, plan_date: str):
+    record = svc.get_published_plan(plan_date)
+    if not record:
+        return None
+    fields = record.get("fields", {})
+    return {
+        "record_id": record.get("id"),
+        "plan_date": fields.get(settings.PUBLISHED_PLANS_DATE_FIELD) or plan_date,
+        "routes": _parse_json(fields.get(settings.PUBLISHED_PLANS_ROUTES_FIELD), []),
+        "deliveries": _parse_json(fields.get(settings.PUBLISHED_PLANS_DELIVERIES_FIELD), []),
+        "meta": _parse_json(fields.get(settings.PUBLISHED_PLANS_META_FIELD), {}),
+        "fleet": _parse_json(fields.get(settings.PUBLISHED_PLANS_FLEET_FIELD), {}),
+        "driver_profiles": _parse_json(fields.get(settings.PUBLISHED_PLANS_DRIVER_PROFILES_FIELD), []),
+        "published_by": fields.get(settings.PUBLISHED_PLANS_PUBLISHED_BY_FIELD),
+        "status": fields.get(settings.PUBLISHED_PLANS_STATUS_FIELD),
+        "updated_at": fields.get(settings.PUBLISHED_PLANS_UPDATED_AT_FIELD),
+        "created_at": record.get("createdTime"),
+    }
+
+
+def _resolve_plan_date(svc: DatabaseService, requested: str | None) -> str:
+    if requested:
+        return requested
+    today = _business_date()
+    if svc.get_published_plan(today):
+        return today
+    return _next_plan_date()
+
+
+def _route_driver_name(route: dict) -> str:
+    profile = route.get("driver_profile")
+    if isinstance(profile, str):
+        return profile
+    if isinstance(profile, dict):
+        return profile.get("name", "")
+    return ""
+
+
+def _route_matches_driver(route: dict, user: dict) -> bool:
+    route_name = _normalize_name(_route_driver_name(route))
+    if not route_name:
+        return False
+    candidates = {
+        _normalize_name(user.get("display_name")),
+        _normalize_name(user.get("name")),
+        _normalize_name(user.get("email")),
+    }
+    return route_name in candidates
+
+
+def _extract_delivery_ids(routes: list[dict]) -> set[str]:
+    ids: set[str] = set()
+    for route in routes or []:
+        stops = route.get("stops")
+        if isinstance(stops, list):
+            for stop in stops:
+                if not isinstance(stop, list):
+                    continue
+                for item in stop:
+                    if isinstance(item, dict) and item.get("type") == "delivery":
+                        if item.get("id") is not None:
+                            ids.add(str(item.get("id")).strip())
+        jobs = route.get("jobs") or []
+        if isinstance(jobs, list):
+            for stop in jobs:
+                if not isinstance(stop, list):
+                    continue
+                for token in stop:
+                    base = str(token or "").split("_Part")[0].strip()
+                    if base and base.lower() != "depot":
+                        ids.add(base)
+    return ids
+
+
+def _filter_routes_for_driver(routes: list[dict], user: dict, include_all: bool) -> list[dict]:
+    if include_all:
+        return routes
+    return [r for r in routes or [] if _route_matches_driver(r, user)]
+
+
+class DriverLoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+class DriverLocation(BaseModel):
+    lat: float | None = None
+    lon: float | None = None
+
+
+class DriverStatusUpdate(BaseModel):
+    status: str | None = None
+    notes: str | None = None
+    photo_urls: list[str] | None = Field(default_factory=list)
+    timestamp: str | None = None
+    location: DriverLocation | None = None
+
+
+@router.post("/auth/login")
+def driver_login(payload: DriverLoginRequest):
+    if settings.AUTH_DEBUG:
+        logger.info("Driver login input email=%s password_len=%s", payload.email, len(payload.password or ""))
+    svc = DatabaseService()
+    rec = svc.get_user_by_email(payload.email.strip())
+    if settings.AUTH_DEBUG:
+        logger.info("Driver login DB user record=%s", _redact_user_record(rec))
+    if not rec:
+        raise HTTPException(status_code=401, detail="Invalid email or password.")
+
+    fields = rec.get("fields", {})
+    if not fields.get(settings.USERS_ACTIVE_FIELD, True):
+        raise HTTPException(status_code=403, detail="Account disabled. Contact manager/admin.")
+
+    stored = fields.get(settings.USERS_PASSWORD_FIELD, "") or ""
+    if not verify_password(payload.password, stored):
+        raise HTTPException(status_code=401, detail="Invalid email or password.")
+    maybe_upgrade_password(rec.get("id"), payload.password, stored)
+
+    role = fields.get(settings.USERS_ROLE_FIELD)
+    if not _role_allows_driver(role):
+        raise HTTPException(status_code=403, detail="Driver access required.")
+
+    session = issue_session(rec.get("id"))
+    user = get_user_from_token(session["token"]) or {
+        "record_id": rec.get("id"),
+        "email": fields.get(settings.USERS_EMAIL_FIELD),
+        "name": fields.get(settings.USERS_NAME_FIELD),
+        "role": role or "driver",
+    }
+    return JSONResponse(
+        {
+            "ok": True,
+            "token": session["token"],
+            "token_type": "Bearer",
+            "expires": session["expires"].isoformat(),
+            "user": {
+                "id": user.get("record_id"),
+                "email": user.get("email"),
+                "name": user.get("name") or user.get("display_name"),
+                "role": user.get("role"),
+            },
+        }
+    )
+
+
+@router.post("/auth/logout")
+def driver_logout(request: Request):
+    user = _require_driver(request)
+    clear_session(user.get("record_id"))
+    return JSONResponse({"ok": True})
+
+
+@router.get("/route/today")
+def driver_route_today(request: Request, include_all: bool = False):
+    user = _require_driver(request)
+    if include_all and not _normalize_name(user.get("role")) in {"admin", "manager"}:
+        include_all = False
+
+    svc = DatabaseService()
+    plan_date = _resolve_plan_date(svc, None)
+    plan = _load_published_plan(svc, plan_date)
+    if not plan:
+        return JSONResponse({"published": False, "plan_date": plan_date, "routes": [], "deliveries": []})
+
+    routes = _filter_routes_for_driver(plan.get("routes", []), user, include_all)
+    delivery_ids = _extract_delivery_ids(routes)
+    deliveries = [
+        d for d in plan.get("deliveries", [])
+        if str(d.get("id") or "").strip() in delivery_ids
+    ]
+
+    resp = JSONResponse(
+        {
+            "published": True,
+            "plan_date": plan.get("plan_date"),
+            "updated_at": plan.get("updated_at") or plan.get("created_at"),
+            "routes": routes,
+            "deliveries": deliveries,
+            "meta": plan.get("meta") or {},
+        }
+    )
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@router.get("/route/{plan_date}")
+def driver_route_date(plan_date: str, request: Request, include_all: bool = False):
+    user = _require_driver(request)
+    if include_all and not _normalize_name(user.get("role")) in {"admin", "manager"}:
+        include_all = False
+
+    svc = DatabaseService()
+    plan = _load_published_plan(svc, plan_date)
+    if not plan:
+        return JSONResponse({"published": False, "plan_date": plan_date, "routes": [], "deliveries": []})
+
+    routes = _filter_routes_for_driver(plan.get("routes", []), user, include_all)
+    delivery_ids = _extract_delivery_ids(routes)
+    deliveries = [
+        d for d in plan.get("deliveries", [])
+        if str(d.get("id") or "").strip() in delivery_ids
+    ]
+
+    resp = JSONResponse(
+        {
+            "published": True,
+            "plan_date": plan.get("plan_date"),
+            "updated_at": plan.get("updated_at") or plan.get("created_at"),
+            "routes": routes,
+            "deliveries": deliveries,
+            "meta": plan.get("meta") or {},
+        }
+    )
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@router.get("/route/changes")
+def driver_route_changes(request: Request, since: str | None = None, date: str | None = None):
+    user = _require_driver(request)
+    svc = DatabaseService()
+    plan_date = _resolve_plan_date(svc, date)
+    plan = _load_published_plan(svc, plan_date)
+    if not plan:
+        return JSONResponse({"published": False, "changed": False, "plan_date": plan_date})
+
+    updated_at = plan.get("updated_at") or plan.get("created_at")
+    updated_dt = _parse_iso(updated_at)
+    since_dt = _parse_iso(since)
+    changed = True
+    if updated_dt and since_dt:
+        changed = updated_dt > since_dt
+
+    resp = JSONResponse(
+        {
+            "published": True,
+            "changed": changed,
+            "plan_date": plan.get("plan_date"),
+            "updated_at": updated_at,
+        }
+    )
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@router.post("/deliveries/{delivery_id}/status")
+def update_delivery_status(delivery_id: str, payload: DriverStatusUpdate, request: Request):
+    user = _require_driver(request)
+    if not delivery_id:
+        raise HTTPException(status_code=400, detail="Missing delivery id.")
+
+    status = (payload.status or "").strip()
+    notes = (payload.notes or "").strip()
+    timestamp = payload.timestamp or _now_iso()
+    photo_urls = [str(u).strip() for u in (payload.photo_urls or []) if str(u).strip()]
+    loc = payload.location
+
+    fields: dict = {}
+    if status and settings.DELIVERIES_STATUS_FIELD:
+        fields[settings.DELIVERIES_STATUS_FIELD] = status
+    if notes and settings.DELIVERIES_DRIVER_NOTES_FIELD:
+        fields[settings.DELIVERIES_DRIVER_NOTES_FIELD] = notes
+    if photo_urls:
+        if settings.DELIVERIES_PHOTO_URLS_FIELD:
+            if settings.DELIVERIES_PHOTO_ATTACHMENTS:
+                fields[settings.DELIVERIES_PHOTO_URLS_FIELD] = [{"url": u} for u in photo_urls]
+            else:
+                fields[settings.DELIVERIES_PHOTO_URLS_FIELD] = json.dumps(photo_urls, separators=(",", ":"))
+    if timestamp and settings.DELIVERIES_STATUS_UPDATED_FIELD:
+        fields[settings.DELIVERIES_STATUS_UPDATED_FIELD] = timestamp
+    if status.lower() == "arrived" and settings.DELIVERIES_ARRIVED_AT_FIELD:
+        fields[settings.DELIVERIES_ARRIVED_AT_FIELD] = timestamp
+    if status.lower() == "delivered" and settings.DELIVERIES_DELIVERED_AT_FIELD:
+        fields[settings.DELIVERIES_DELIVERED_AT_FIELD] = timestamp
+    if loc and loc.lat is not None and settings.DELIVERIES_DRIVER_LAT_FIELD:
+        fields[settings.DELIVERIES_DRIVER_LAT_FIELD] = float(loc.lat)
+    if loc and loc.lon is not None and settings.DELIVERIES_DRIVER_LON_FIELD:
+        fields[settings.DELIVERIES_DRIVER_LON_FIELD] = float(loc.lon)
+
+    if settings.DELIVERIES_DRIVER_FIELD and (user.get("name") or user.get("display_name")):
+        fields[settings.DELIVERIES_DRIVER_FIELD] = user.get("name") or user.get("display_name")
+
+    if not fields:
+        raise HTTPException(status_code=400, detail="No fields to update.")
+
+    svc = DatabaseService()
+    updated = svc.update_delivery_by_business_id(delivery_id, fields)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Delivery not found.")
+
+    resp = JSONResponse({"ok": True, "delivery_id": delivery_id, "updated_fields": list(fields.keys())})
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@router.post("/uploads/photo")
+async def upload_photo(request: Request, file: UploadFile = File(...)):
+    _require_driver(request)
+    if not file or not file.filename:
+        raise HTTPException(status_code=400, detail="Missing file.")
+
+    content_type = (file.content_type or "").lower()
+    if content_type and not content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="Only image uploads are allowed.")
+
+    os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
+    ext = os.path.splitext(file.filename)[1].lower()
+    if not ext:
+        ext = ".jpg" if content_type.endswith("jpeg") else ".png"
+    filename = f"{uuid.uuid4().hex}{ext}"
+    target_path = os.path.join(settings.UPLOAD_DIR, filename)
+
+    max_bytes = max(1, int(settings.UPLOAD_MAX_MB)) * 1024 * 1024
+    total = 0
+    with open(target_path, "wb") as out:
+        while True:
+            chunk = await file.read(1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                out.close()
+                try:
+                    os.remove(target_path)
+                except OSError:
+                    logger.warning("Failed to remove oversized upload %s", target_path, exc_info=True)
+                raise HTTPException(status_code=413, detail="File too large.")
+            out.write(chunk)
+
+    url_path = f"/uploads/{filename}"
+    resp = JSONResponse({"ok": True, "url": url_path, "filename": filename, "bytes": total})
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
