@@ -1351,6 +1351,7 @@ class MapboxService:
     _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
     _CACHE_DIR = os.getenv("MATRIX_CACHE_DIR", os.path.join(_BASE_DIR, ".cache"))
     _MATRIX_VALIDATION_VERSION = 2
+    _LAST_CACHE_CLEANUP = 0.0
 
     @classmethod
     def _matrix_cache_key(cls, coords_list) -> str:
@@ -1363,9 +1364,68 @@ class MapboxService:
         return os.path.join(cls._CACHE_DIR, f"matrix_{key}.json")
 
     @classmethod
+    def _cache_ttl_seconds(cls) -> int:
+        try:
+            return max(0, int(settings.MATRIX_CACHE_TTL_SECONDS))
+        except Exception:
+            return 0
+
+    @classmethod
+    def _cache_cleanup_interval_seconds(cls) -> int:
+        try:
+            return max(60, int(settings.MATRIX_CACHE_CLEANUP_INTERVAL_SECONDS))
+        except Exception:
+            return 3600
+
+    @classmethod
+    def _is_cache_expired(cls, path: str, now: float | None = None) -> bool:
+        ttl = cls._cache_ttl_seconds()
+        if ttl <= 0:
+            return False
+        try:
+            mtime = os.path.getmtime(path)
+        except Exception:
+            return False
+        if now is None:
+            now = time.time()
+        return (now - mtime) > ttl
+
+    @classmethod
+    def _cleanup_matrix_cache(cls):
+        ttl = cls._cache_ttl_seconds()
+        if ttl <= 0:
+            return
+        now = time.time()
+        with _MATRIX_CACHE_LOCK:
+            interval = cls._cache_cleanup_interval_seconds()
+            if (now - cls._LAST_CACHE_CLEANUP) < interval:
+                return
+            cls._LAST_CACHE_CLEANUP = now
+            try:
+                if not os.path.isdir(cls._CACHE_DIR):
+                    return
+                for name in os.listdir(cls._CACHE_DIR):
+                    if not (name.startswith("matrix_") and name.endswith(".json")):
+                        continue
+                    path = os.path.join(cls._CACHE_DIR, name)
+                    try:
+                        if cls._is_cache_expired(path, now=now):
+                            os.remove(path)
+                    except FileNotFoundError:
+                        continue
+            except Exception as e:
+                logger.warning("Error cleaning matrix cache: %s", e)
+
+    @classmethod
     def _load_matrix_cache(cls, key: str):
         path = cls._matrix_cache_path(key)
         if not os.path.exists(path):
+            return None
+        if cls._is_cache_expired(path):
+            try:
+                os.remove(path)
+            except Exception:
+                pass
             return None
         try:
             with open(path, "r", encoding="utf-8") as fh:
@@ -1662,6 +1722,7 @@ class MapboxService:
         if not settings.MAPBOX_TOKEN:
             raise RuntimeError("Missing MAPBOX_TOKEN env var.")
 
+        MapboxService._cleanup_matrix_cache()
         cache_key = MapboxService._matrix_cache_key(coords_list)
         if not force_refresh:
             cached = MapboxService._load_matrix_cache(cache_key)
