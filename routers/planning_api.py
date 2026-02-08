@@ -131,6 +131,7 @@ class BulkCargoUpdateRequest(BaseModel):
 
 class BulkUpdateDeliveryItem(BaseModel):
     delivery_id: str
+    ps_delivered: bool | None = None
     med_skid: int | None = Field(default=None, ge=0)
     large_skid: int | None = Field(default=None, ge=0)
     small_skid: int | None = Field(default=None, ge=0)
@@ -1022,42 +1023,6 @@ def deliveries_bulk_create(payload: BulkCreateDeliveriesRequest, request: Reques
 
     ok_count = sum(1 for r in results if r.get("ok"))
     resp = JSONResponse({"ok": ok_count == len(results), "count": ok_count, "results": results})
-    resp.headers["Cache-Control"] = "no-store"
-    return resp
-
-
-@router.post("/deliveries/next-day/bulk-update")
-def deliveries_next_day_bulk_update(payload: BulkCargoUpdateRequest, request: Request):
-    user = get_current_user(request)
-    if not user or user.get("role") not in ("manager", "admin"):
-        raise HTTPException(status_code=403, detail="Manager/Admin access required.")
-
-    fields: dict[str, int] = {}
-    if payload.med_skid is not None:
-        fields["Med Skid"] = int(payload.med_skid)
-    if payload.large_skid is not None:
-        fields["Large Skid"] = int(payload.large_skid)
-    if payload.small_skid is not None:
-        fields["Small Skid"] = int(payload.small_skid)
-    if payload.pickup is not None:
-        fields["Pickup"] = bool(payload.pickup)
-    if payload.requires_empty_truck is not None:
-        fields["Requires Empty Truck"] = bool(payload.requires_empty_truck)
-    if payload.door is not None:
-        fields["Door"] = int(payload.door)
-    if payload.frame is not None:
-        fields["Frame"] = int(payload.frame)
-    if payload.exp_frame is not None:
-        fields["Exp Frame"] = int(payload.exp_frame)
-    if payload.box is not None:
-        fields["Box"] = int(payload.box)
-
-    if not fields:
-        raise HTTPException(status_code=400, detail="No fields provided for update.")
-
-    svc = DatabaseService()
-    result = svc.bulk_update_next_day_deliveries(fields)
-    resp = JSONResponse({"ok": True, **result})
     resp.headers["Cache-Control"] = "no-store"
     return resp
 

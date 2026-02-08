@@ -710,29 +710,6 @@ class DatabaseService:
         target = self._resolve_target_date()
         return target.isoformat()
 
-    def bulk_update_next_day_deliveries(self, update_fields: Dict[str, Any]) -> Dict[str, Any]:
-        target_date = self._resolve_target_date()
-        updated_ids: list[str] = []
-        errors: list[Dict[str, Any]] = []
-        with SessionLocal() as session:
-            deliveries = session.execute(
-                select(Delivery).where(Delivery.scheduled_date == target_date)
-            ).scalars().all()
-            for delivery in deliveries:
-                try:
-                    self._apply_delivery_fields(delivery, update_fields)
-                    updated_ids.append(str(delivery.delivery_id))
-                except Exception as e:
-                    errors.append({"record_id": str(delivery.delivery_id), "error": str(e)})
-            session.commit()
-        if updated_ids:
-            self._invalidate_cache("Deliveries")
-        return {
-            "target_date": target_date.isoformat(),
-            "updated": len(updated_ids),
-            "errors": errors,
-        }
-
     def bulk_update_deliveries_by_business_id(self, updates: list[Dict[str, Any]]) -> Dict[str, Any]:
         updated_ids: list[str] = []
         errors: list[Dict[str, Any]] = []
@@ -755,6 +732,8 @@ class DatabaseService:
 
                 if "med_skid" in item:
                     delivery.med_skid = self._coerce_int(item.get("med_skid"))
+                if "ps_delivered" in item:
+                    delivery.ps_delivered = self._to_bool(item.get("ps_delivered"))
                 if "skid" in item:
                     delivery.med_skid = self._coerce_int(item.get("skid"))
                 if "small_skid" in item:
