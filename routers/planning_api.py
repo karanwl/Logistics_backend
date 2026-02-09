@@ -48,6 +48,20 @@ def _require_manager_admin(request: Request):
     return user
 
 
+@router.get("/me")
+def current_user(request: Request):
+    user = get_current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Login required.")
+    payload = {
+        "id": user.get("record_id") or user.get("id"),
+        "email": user.get("email"),
+        "name": user.get("name") or user.get("display_name"),
+        "role": user.get("role"),
+    }
+    return JSONResponse({"user": payload})
+
+
 class FleetRequest(BaseModel):
     trucks: int = Field(default=settings.PHYSICAL_TRUCKS, ge=0)
     vans: int = Field(default=0, ge=0)
