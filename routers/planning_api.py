@@ -378,7 +378,14 @@ def users_update(record_id: str, payload: UserUpdateRequest, request: Request):
     if not fields:
         raise HTTPException(status_code=400, detail="No fields to update.")
     svc = DatabaseService()
-    updated = svc.update_record(settings.USERS_TABLE, record_id, fields)
+    try:
+        updated = svc.update_record(settings.USERS_TABLE, record_id, fields)
+    except ValueError:
+        # Fallback: record_id might be an email with different casing/spacing.
+        rec = svc.get_user_by_email(record_id)
+        if not rec:
+            raise HTTPException(status_code=404, detail="User not found.")
+        updated = svc.update_record(settings.USERS_TABLE, rec.get("id"), fields)
     resp = JSONResponse({"ok": True, "record": updated})
     resp.headers["Cache-Control"] = "no-store"
     return resp
