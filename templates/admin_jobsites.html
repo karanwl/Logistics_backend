@@ -49,7 +49,7 @@
             </a>
           </div>
         </div>
-        <form method="post" action="/admin/jobsites/create" autocomplete="on">
+        <form method="post" action="/jobsites/create" autocomplete="on">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
           {% if error %}
             <div class="empty-state">{{ error }}</div>

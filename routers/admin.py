@@ -104,20 +104,20 @@ def plan_view(request: Request):
 
 @router.get("/admin", response_class=HTMLResponse)
 def admin_home(request: Request):
-    user = _require_user(request)
+    user = _require_admin_only(request)
     if not user:
-        return _redirect("/login")
+        return _redirect("/")
     return _template(
         "admin_home.html",
-        {"request": request, "user": user, "can_edit": user.get("role") in ("manager", "admin")},
+        {"request": request, "user": user, "can_edit": True},
     )
 
 
-@router.get("/admin/meeting-intake", response_class=HTMLResponse)
+@router.get("/meeting-intake", response_class=HTMLResponse)
 def admin_meeting_intake(request: Request):
     user = _require_manager_or_admin(request)
     if not user:
-        return _redirect("/admin")
+        return _redirect("/")
     svc = DatabaseService()
     jobsites = svc.list_jobsites_min(force_refresh=_wants_refresh(request))
     return _template(
@@ -126,11 +126,11 @@ def admin_meeting_intake(request: Request):
     )
 
 
-@router.get("/admin/users", response_class=HTMLResponse)
+@router.get("/users", response_class=HTMLResponse)
 def admin_users(request: Request):
     user = _require_admin_only(request)
     if not user:
-        return _redirect("/admin")
+        return _redirect("/")
     svc = DatabaseService()
     users = svc.list_users_min(active_only=False, force_refresh=_wants_refresh(request))
     roles = ["coordinator", "driver", "manager", "admin"]
@@ -140,7 +140,7 @@ def admin_users(request: Request):
     )
 
 
-@router.post("/admin/users/create", response_class=HTMLResponse)
+@router.post("/users/create", response_class=HTMLResponse)
 def admin_users_create(
     request: Request,
     name: str = Form(""),
@@ -156,7 +156,7 @@ def admin_users_create(
             {
                 "request": request,
                 "title": "Access denied",
-                "back_href": "/admin/users",
+                "back_href": "/users",
                 "payload": {"error": "Admin access required."},
                 "extra_title": None,
                 "extra_payload": None,
@@ -209,7 +209,7 @@ def admin_users_create(
         {
             "request": request,
             "title": "User created",
-            "back_href": "/admin/users",
+            "back_href": "/users",
             "payload": created,
             "extra_title": None,
             "extra_payload": None,
@@ -217,7 +217,7 @@ def admin_users_create(
     )
 
 
-@router.post("/admin/users/{record_id}/update", response_class=HTMLResponse)
+@router.post("/users/{record_id}/update", response_class=HTMLResponse)
 def admin_users_update(
     request: Request,
     record_id: str,
@@ -234,7 +234,7 @@ def admin_users_update(
             {
                 "request": request,
                 "title": "Access denied",
-                "back_href": "/admin/users",
+                "back_href": "/users",
                 "payload": {"error": "Admin access required."},
                 "extra_title": None,
                 "extra_payload": None,
@@ -280,32 +280,32 @@ def admin_users_update(
             {
                 "request": request,
                 "title": "User update failed",
-                "back_href": _get_next_url(request, next_url, "/admin/users"),
+                "back_href": _get_next_url(request, next_url, "/users"),
                 "payload": {"record_id": record_id},
                 "extra_title": "Airtable error",
                 "extra_payload": detail or str(e),
             },
         )
 
-    return _redirect(_get_next_url(request, next_url, "/admin/users"))
+    return _redirect(_get_next_url(request, next_url, "/users"))
 
 
-@router.get("/admin/published-plans", response_class=HTMLResponse)
+@router.get("/published-plans", response_class=HTMLResponse)
 def admin_published_plans(request: Request):
     user = _require_manager_or_admin(request)
     if not user:
-        return _redirect("/admin")
+        return _redirect("/")
     return _template(
         "published_plans.html",
         {"request": request, "user": user, "settings": settings},
     )
 
 
-@router.get("/admin/jobsites", response_class=HTMLResponse)
+@router.get("/jobsites", response_class=HTMLResponse)
 def admin_jobsites(request: Request):
     user = _require_manager_or_admin(request)
     if not user:
-        return _redirect("/admin")
+        return _redirect("/")
     return _template(
         "admin_jobsites.html",
         {
@@ -320,7 +320,7 @@ def admin_jobsites(request: Request):
     )
 
 
-@router.post("/admin/jobsites/create", response_class=HTMLResponse)
+@router.post("/jobsites/create", response_class=HTMLResponse)
 def admin_jobsites_create(
     request: Request,
     name: str = Form(...),
@@ -333,7 +333,7 @@ def admin_jobsites_create(
             {
                 "request": request,
                 "title": "Access denied",
-                "back_href": "/admin/jobsites",
+                "back_href": "/jobsites",
                 "payload": {"error": "Manager/Admin access required."},
                 "extra_title": None,
                 "extra_payload": None,
@@ -388,7 +388,7 @@ def admin_jobsites_create(
         {
             "request": request,
             "title": "Jobsite created",
-            "back_href": "/admin/jobsites",
+            "back_href": "/jobsites",
             "payload": created,
             "extra_title": "Geocode result",
             "extra_payload": geocode_status,
@@ -396,7 +396,7 @@ def admin_jobsites_create(
     )
 
 
-@router.post("/admin/jobsites/create-json")
+@router.post("/jobsites/create-json")
 def admin_jobsites_create_json(
     request: Request,
     name: str = Form(...),
@@ -458,7 +458,7 @@ def admin_jobsites_create_json(
     )
 
 
-@router.post("/admin/deliveries/create", response_class=HTMLResponse)
+@router.post("/deliveries/create", response_class=HTMLResponse)
 def admin_deliveries_create(
     request: Request,
     jobsite_id: str = Form(...),
@@ -522,7 +522,7 @@ def admin_deliveries_create(
     return _redirect(_get_next_url(request, next_url, "/"))
 
 
-@router.get("/admin/deliveries/{delivery_id}", response_class=HTMLResponse)
+@router.get("/deliveries/{delivery_id}", response_class=HTMLResponse)
 def admin_deliveries_edit(request: Request, delivery_id: str):
     user = _require_manager_or_admin(request)
     if not user:
@@ -578,7 +578,7 @@ def admin_deliveries_edit(request: Request, delivery_id: str):
     )
 
 
-@router.post("/admin/deliveries/{delivery_id}/update", response_class=HTMLResponse)
+@router.post("/deliveries/{delivery_id}/update", response_class=HTMLResponse)
 def admin_deliveries_update(
     request: Request,
     delivery_id: str,
@@ -679,7 +679,7 @@ def admin_deliveries_update(
     return _redirect(_get_next_url(request, next_url, "/"))
 
 
-@router.post("/admin/deliveries/{delivery_id}/delete", response_class=HTMLResponse)
+@router.post("/deliveries/{delivery_id}/delete", response_class=HTMLResponse)
 def admin_deliveries_delete(request: Request, delivery_id: str):
     user = _require_manager_or_admin(request)
     if not user:

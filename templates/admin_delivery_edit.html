@@ -8,7 +8,7 @@
           <p class="card-subtitle">Update delivery details and time windows.</p>
         </div>
       </div>
-      <form method="post" action="/admin/deliveries/{{ delivery.delivery_id }}/update" data-inline-form="1">
+      <form method="post" action="/deliveries/{{ delivery.delivery_id }}/update" data-inline-form="1">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
         <input type="hidden" name="next" value="{{ next_url }}" />
         <label for="inlineJobsiteId">Job (linked record field: "{{ job_link_field }}")</label>
@@ -146,7 +146,7 @@
             </a>
           </div>
         </div>
-        <form method="post" action="/admin/deliveries/{{ delivery.delivery_id }}/update">
+        <form method="post" action="/deliveries/{{ delivery.delivery_id }}/update">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
           <input type="hidden" name="next" value="{{ next_url }}" />
           <label for="pageJobsiteId">Job (linked record field: "{{ job_link_field }}")</label>

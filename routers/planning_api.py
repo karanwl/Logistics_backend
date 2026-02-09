@@ -176,6 +176,28 @@ def drivers_list(request: Request):
     return resp
 
 
+@router.get("/drivers/list-full")
+def drivers_list_full(request: Request):
+    user = get_current_user(request)
+    if not user or user.get("role") not in ("manager", "admin"):
+        raise HTTPException(status_code=403, detail="Manager/Admin access required.")
+    svc = DatabaseService()
+    records = svc.list_users_min(role=settings.DRIVERS_ROLE_VALUE, active_only=False, force_refresh=_wants_refresh(request))
+    drivers = []
+    for rec in records or []:
+        drivers.append(
+            {
+                "id": rec.get("record_id") or rec.get("id"),
+                "email": rec.get("email"),
+                "name": rec.get("name") or rec.get("display_name"),
+                "role": rec.get("role"),
+            }
+        )
+    resp = JSONResponse({"drivers": drivers})
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
 
 @router.get("/deliveries/all")
 def deliveries_all(request: Request):

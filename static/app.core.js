@@ -134,8 +134,8 @@ function renderDeliveriesTable(target, deliveries, options = {}) {
   const rows = deliveries.map(d => {
     const deliveryId = String(d.id || '').trim();
     const nextParam = encodeURIComponent(`${window.location.pathname}${window.location.search || ''}`);
-    const editHref = `/admin/deliveries/${encodeURIComponent(deliveryId)}?next=${nextParam}`;
-    const deleteAction = `/admin/deliveries/${encodeURIComponent(deliveryId)}/delete?next=${nextParam}`;
+    const editHref = `/deliveries/${encodeURIComponent(deliveryId)}?next=${nextParam}`;
+    const deleteAction = `/deliveries/${encodeURIComponent(deliveryId)}/delete?next=${nextParam}`;
     const salesOrderRaw = String(d.sales_order || '').trim();
     const salesOrderText = salesOrderRaw ? `Sales Order: ${salesOrderRaw}` : 'Sales Order: --';
     const actions = showActions ? `

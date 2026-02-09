@@ -42,7 +42,7 @@
         {% if error %}
           <div class="helper" role="alert">Error: {{ error }}</div>
         {% endif %}
-        <form method="post" action="/admin/users/create" autocomplete="on">
+        <form method="post" action="/users/create" autocomplete="on">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
           <label for="createUserName">Name</label>
           <input id="createUserName" name="name" placeholder="e.g., Alex Johnson" autocomplete="name" />
@@ -144,9 +144,9 @@
   </main>
 
   {% for u in users %}
-    <form id="user-form-{{ u.record_id }}" method="post" action="/admin/users/{{ u.record_id }}/update">
+    <form id="user-form-{{ u.record_id }}" method="post" action="/users/{{ u.record_id }}/update">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-      <input type="hidden" name="next" value="/admin/users" />
+      <input type="hidden" name="next" value="/users" />
     </form>
   {% endfor %}
 

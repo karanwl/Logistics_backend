@@ -25,11 +25,11 @@
     <nav class="site-nav">
       <a href="/plan">Plan</a>
       {% if user.role in ['manager', 'admin'] %}
-        <a href="/admin/jobsites">Create Jobsite</a>
-        <a href="/admin/meeting-intake">Meeting Intake</a>
+        <a href="/jobsites">Create Jobsite</a>
+        <a href="/meeting-intake">Meeting Intake</a>
       {% endif %}
       {% if user.role == 'admin' %}
-        <a href="/admin/users">Manage Users</a>
+        <a href="/users">Manage Users</a>
       {% endif %}
       <a href="/logout">Logout</a>
     </nav>
@@ -47,7 +47,7 @@
         <div class="link-list">
           <div class="link-item">
             {% if can_edit %}
-              <a href="/admin/jobsites">Create Jobsite</a>
+              <a href="/jobsites">Create Jobsite</a>
               <p>Add a jobsite with geocoding.</p>
             {% else %}
               <div><strong>Manager/Admin only</strong></div>
@@ -60,17 +60,17 @@
           </div>
           {% if can_edit %}
             <div class="link-item">
-              <a href="/admin/published-plans">Published Plans</a>
+              <a href="/published-plans">Published Plans</a>
               <p>Review plans by day and share with drivers.</p>
             </div>
             <div class="link-item">
-              <a href="/admin/meeting-intake">Meeting Intake</a>
+              <a href="/meeting-intake">Meeting Intake</a>
               <p>Capture sales orders and schedule dates after the morning meeting.</p>
             </div>
           {% endif %}
           {% if user.role == 'admin' %}
             <div class="link-item">
-              <a href="/admin/users">Manage Users</a>
+              <a href="/users">Manage Users</a>
               <p>Create accounts, reset passwords, and update roles.</p>
             </div>
           {% endif %}

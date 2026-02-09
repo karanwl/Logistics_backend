@@ -1761,7 +1761,7 @@ function renderCalendarUnscheduled(items) {
     const { status } = getPsStatus(d, dateKey);
     const statusClass = ` ps-status--${status}`;
     const nextParam = encodeURIComponent(`${window.location.pathname}${window.location.search || ''}`);
-    const editHref = (canEdit && deliveryId) ? `/admin/deliveries/${encodeURIComponent(deliveryId)}?next=${nextParam}` : '';
+    const editHref = (canEdit && deliveryId) ? `/deliveries/${encodeURIComponent(deliveryId)}?next=${nextParam}` : '';
     const inlineAttrs = (canEdit && deliveryId) ? ` data-inline-edit="1" data-delivery-id="${escapeHtml(deliveryId)}"` : '';
     const title = escapeHtml(d.job_name || 'Untitled Job');
     const salesOrderRaw = String(d.sales_order || '').trim();
@@ -1822,7 +1822,7 @@ function renderScheduleCalendar(deliveries, year, month) {
     const list = visible.map((d) => {
       const deliveryId = String(d.delivery_id || '').trim();
       const nextParam = encodeURIComponent(`${window.location.pathname}${window.location.search || ''}`);
-      const editHref = (canEdit && deliveryId) ? `/admin/deliveries/${encodeURIComponent(deliveryId)}?next=${nextParam}` : '';
+      const editHref = (canEdit && deliveryId) ? `/deliveries/${encodeURIComponent(deliveryId)}?next=${nextParam}` : '';
       const inlineAttrs = (canEdit && deliveryId) ? ` data-inline-edit="1" data-delivery-id="${escapeHtml(deliveryId)}"` : '';
       const { status } = getPsStatus(d, key);
       const statusClass = ` ps-status--${status}`;
@@ -1849,7 +1849,7 @@ function renderScheduleCalendar(deliveries, year, month) {
     const overflowList = overflow.map((d) => {
       const deliveryId = String(d.delivery_id || '').trim();
       const nextParam = encodeURIComponent(`${window.location.pathname}${window.location.search || ''}`);
-      const editHref = (canEdit && deliveryId) ? `/admin/deliveries/${encodeURIComponent(deliveryId)}?next=${nextParam}` : '';
+      const editHref = (canEdit && deliveryId) ? `/deliveries/${encodeURIComponent(deliveryId)}?next=${nextParam}` : '';
       const inlineAttrs = (canEdit && deliveryId) ? ` data-inline-edit="1" data-delivery-id="${escapeHtml(deliveryId)}"` : '';
       const { status } = getPsStatus(d, key);
       const statusClass = ` ps-status--${status}`;
@@ -2316,7 +2316,7 @@ function renderScheduleList(deliveries) {
         aria-label="Paperwork received for ${escapeHtml(deliveryId || d.job_name || 'delivery')}" />
     `;
     const nextParam = encodeURIComponent(`${window.location.pathname}${window.location.search || ''}`);
-    const deleteAction = `/admin/deliveries/${encodeURIComponent(deliveryId)}/delete?next=${nextParam}`;
+    const deleteAction = `/deliveries/${encodeURIComponent(deliveryId)}/delete?next=${nextParam}`;
     const actions = canEdit ? `
       <div class="table-actions">
         <form method="post" action="${deleteAction}">
@@ -3013,7 +3013,7 @@ function initInlineEditDrawer() {
 
     try {
       const nextParam = encodeURIComponent(`${window.location.pathname}${window.location.search || ''}`);
-      const res = await apiFetch(`/admin/deliveries/${encodeURIComponent(deliveryId)}?embed=1&next=${nextParam}`, { cache: 'no-store' });
+      const res = await apiFetch(`/deliveries/${encodeURIComponent(deliveryId)}?embed=1&next=${nextParam}`, { cache: 'no-store' });
       const html = await res.text();
       body.innerHTML = html;
 
@@ -3612,7 +3612,7 @@ function initMeetingIntake() {
       return;
     }
     try {
-      const res = await apiFetch('/admin/jobsites/create-json', {
+      const res = await apiFetch('/jobsites/create-json', {
         method: 'POST',
         body: formData,
         cache: 'no-store',

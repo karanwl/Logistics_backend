@@ -28,7 +28,7 @@
       {% if user.role in ['manager', 'admin'] %}
         <a href="/admin">Manager/Admin Home</a>
         <a href="/">Schedule</a>
-        <a href="/admin/published-plans">Published Plans</a>
+        <a href="/published-plans">Published Plans</a>
       {% endif %}
       <a href="/logout">Logout</a>
     </nav>
@@ -71,7 +71,7 @@
             </span>
             <span class="sr-only">Publish Plan</span>
           </button>
-          <a class="btn btn-secondary icon-only" href="/admin/published-plans" title="View Published Plans" aria-label="View Published Plans">
+          <a class="btn btn-secondary icon-only" href="/published-plans" title="View Published Plans" aria-label="View Published Plans">
             <span class="btn-icon" aria-hidden="true">
               <svg viewBox="0 0 24 24">
                 <path d="M2 12s4-6 10-6 10 6 10 6-4 6-10 6-10-6-10-6" />
