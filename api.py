@@ -5,8 +5,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from config import settings
-from routers.admin import router as admin_router
-from routers.auth import router as auth_router
+from routers.auth_api import router as auth_api_router
 from routers.driver_api import router as driver_router
 from routers.planning_api import router as planning_router
 from security import new_csrf_token, set_csrf_cookie
@@ -40,17 +39,13 @@ async def security_headers_middleware(request, call_next):
     response.headers["Referrer-Policy"] = "same-origin"
     return response
 
-# Static files (JS/CSS)
-app.mount("/static", StaticFiles(directory="static"), name="static")
-
 # Uploads (driver photo proof)
 os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
 app.mount("/uploads", StaticFiles(directory=settings.UPLOAD_DIR), name="uploads")
 
 # Routers
 app.include_router(planning_router)
-app.include_router(admin_router)
-app.include_router(auth_router)
+app.include_router(auth_api_router)
 app.include_router(driver_router)
 
 
