@@ -1,11 +1,11 @@
 import logging
 
-from fastapi import APIRouter, Depends, Form, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, Depends, Form, HTTPException, Request
 
 from auth import clear_session, get_current_user, hash_password, issue_session, verify_password, maybe_upgrade_password
 from config import settings
 from security import csrf_protect
+from responses import ok_response
 from services import DatabaseService
 
 router = APIRouter(dependencies=[Depends(csrf_protect)])
@@ -22,7 +22,7 @@ def _redact_user_record(rec: dict | None) -> dict | None:
 
 
 @router.post("/login")
-def login_submit(email: str = Form(...), password: str = Form(...)):
+def login_submit(request: Request, email: str = Form(...), password: str = Form(...)):
     if settings.AUTH_DEBUG:
         logger.info("Login form input email=%s password_len=%s", email, len(password or ""))
     svc = DatabaseService()
@@ -42,7 +42,7 @@ def login_submit(email: str = Form(...), password: str = Form(...)):
     maybe_upgrade_password(rec.get("id"), password, stored)
 
     session = issue_session(rec.get("id"))
-    resp = JSONResponse({"ok": True})
+    resp = ok_response(request, {"ok": True})
     resp.set_cookie(
         settings.AUTH_COOKIE_NAME,
         session["token"],
@@ -57,11 +57,11 @@ def login_submit(email: str = Form(...), password: str = Form(...)):
 
 
 @router.get("/logout")
-def logout(request):
+def logout(request: Request):
     user = get_current_user(request)
     if user:
         clear_session(user["record_id"])
-    resp = JSONResponse({"ok": True})
+    resp = ok_response(request, {"ok": True})
     resp.delete_cookie(
         settings.AUTH_COOKIE_NAME,
         domain=settings.AUTH_COOKIE_DOMAIN,

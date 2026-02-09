@@ -1,4 +1,4 @@
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from typing import Any, Optional
 
 
@@ -53,3 +53,19 @@ class DeliveryJob(BaseModel):
         )
 
     model_config = ConfigDict(coerce_numbers_to_str=True, extra="ignore")
+
+
+class ErrorBody(BaseModel):
+    message: str
+    code: str | None = None
+    details: Any | None = None
+
+
+class ErrorResponse(BaseModel):
+    ok: bool = Field(default=False)
+    error: ErrorBody
+    detail: Any | None = None
+
+
+class ValidationErrorResponse(ErrorResponse):
+    error: ErrorBody

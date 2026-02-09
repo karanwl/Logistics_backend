@@ -4,7 +4,7 @@ import json
 import logging
 
 from fastapi.responses import HTMLResponse, JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from starlette.requests import Request
 
 from fastapi import HTTPException
@@ -23,7 +23,8 @@ from security import csrf_protect
 
 from datetime import datetime
 from zoneinfo import ZoneInfo
-from utils import business_date_iso, next_plan_date_iso, parse_sales_order, to_int
+from responses import ok_response
+from utils import business_date_iso, next_plan_date_iso, parse_sales_order, parse_iso_date, to_int
 
 router = APIRouter(dependencies=[Depends(csrf_protect)])
 logger = logging.getLogger(__name__)
@@ -59,7 +60,7 @@ def current_user(request: Request):
         "name": user.get("name") or user.get("display_name"),
         "role": user.get("role"),
     }
-    return JSONResponse({"user": payload})
+    return ok_response(request, {"user": payload})
 
 
 class FleetRequest(BaseModel):
@@ -72,6 +73,11 @@ class SolveRunRequest(BaseModel):
     vans: int = Field(default=0, ge=0)
     force_refresh: bool = False
     plan_date: str | None = None
+
+    @field_validator("plan_date")
+    @classmethod
+    def _validate_plan_date(cls, value):
+        return parse_iso_date(value, field_name="plan_date", allow_none=True)
 
 
 class RecalculateRoute(BaseModel):
@@ -88,6 +94,11 @@ class PublishPlanRequest(BaseModel):
     fleet: dict | None = None
     plan_date: str | None = None
     driver_profiles: list[dict] | None = None
+
+    @field_validator("plan_date")
+    @classmethod
+    def _validate_plan_date(cls, value):
+        return parse_iso_date(value, field_name="plan_date", allow_none=True)
 
 
 class CustomStopPoint(BaseModel):
@@ -107,6 +118,11 @@ class CustomStopEstimateRequest(BaseModel):
 class RescheduleRequest(BaseModel):
     scheduled_date: str | None = None
 
+    @field_validator("scheduled_date")
+    @classmethod
+    def _validate_scheduled_date(cls, value):
+        return parse_iso_date(value, field_name="scheduled_date", allow_none=True)
+
 
 class PSDeliveredRequest(BaseModel):
     delivered: bool = False
@@ -125,6 +141,11 @@ class BulkDeliveryItem(BaseModel):
     exp_frame: int = Field(default=0, ge=0)
     pickup: bool = False
     requires_empty_truck: bool = False
+
+    @field_validator("scheduled_date")
+    @classmethod
+    def _validate_scheduled_date(cls, value):
+        return parse_iso_date(value, field_name="scheduled_date", allow_none=False)
 
 
 class BulkCreateDeliveriesRequest(BaseModel):
@@ -171,7 +192,7 @@ def drivers_list(request: Request):
     svc = DatabaseService()
     records = svc.list_users_min(role=settings.DRIVERS_ROLE_VALUE, active_only=False, force_refresh=_wants_refresh(request))
     drivers = [d.get("display_name") or d.get("name") for d in records if d.get("display_name") or d.get("name")]
-    resp = JSONResponse({"drivers": drivers})
+    resp = ok_response(request, {"drivers": drivers})
     resp.headers["Cache-Control"] = "no-store"
     return resp
 
@@ -193,7 +214,7 @@ def drivers_list_full(request: Request):
                 "role": rec.get("role"),
             }
         )
-    resp = JSONResponse({"drivers": drivers})
+    resp = ok_response(request, {"drivers": drivers})
     resp.headers["Cache-Control"] = "no-store"
     return resp
 
@@ -206,7 +227,7 @@ def deliveries_all(request: Request):
         raise HTTPException(status_code=403, detail="Login required.")
     svc = DatabaseService()
     deliveries = svc.list_deliveries_min(force_refresh=_wants_refresh(request))
-    resp = JSONResponse({"deliveries": deliveries, "count": len(deliveries)})
+    resp = ok_response(request, {"deliveries": deliveries, "count": len(deliveries)})
     resp.headers["Cache-Control"] = "no-store"
     return resp
 
@@ -217,7 +238,10 @@ def plan_tomorrow(fleet: FleetRequest, request: Request):
     if not user or user.get("role") not in ("manager", "admin"):
         raise HTTPException(status_code=403, detail="Manager/Admin access required.")
     force_refresh = _wants_refresh(request)
-    resp = JSONResponse(generate_tomorrow_plan(trucks=fleet.trucks, vans=fleet.vans, force_refresh=force_refresh))
+    resp = ok_response(
+        request,
+        generate_tomorrow_plan(trucks=fleet.trucks, vans=fleet.vans, force_refresh=force_refresh),
+    )
     resp.headers["Cache-Control"] = "no-store"
     return resp
 
@@ -229,7 +253,7 @@ def plan_recalculate(payload: list[RecalculateRoute], request: Request):
         raise HTTPException(status_code=403, detail="Manager/Admin access required.")
     routes = [r.model_dump() for r in payload]
     force_refresh = _wants_refresh(request)
-    resp = JSONResponse(recalculate_tomorrow_plan(routes, force_refresh=force_refresh))
+    resp = ok_response(request, recalculate_tomorrow_plan(routes, force_refresh=force_refresh))
     resp.headers["Cache-Control"] = "no-store"
     return resp
 
@@ -249,6 +273,13 @@ def _to_int_safe(value: Any, default: int = 0) -> int:
         return int(float(value))
     except (TypeError, ValueError):
         return default
+
+
+def _require_iso_date_param(value: str | None, field_name: str) -> str:
+    try:
+        return parse_iso_date(value, field_name=field_name, allow_none=False)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 def _normalize_plan_delivery(item: Any) -> Dict[str, Any]:
@@ -324,12 +355,13 @@ def plan_publish(payload: PublishPlanRequest, request: Request):
         )
         resp.headers["Cache-Control"] = "no-store"
         return resp
-    resp = JSONResponse(
+    resp = ok_response(
+        request,
         {
             "ok": True,
             "plan_date": plan_date,
             "record_id": record.get("id"),
-        }
+        },
     )
     resp.headers["Cache-Control"] = "no-store"
     return resp
@@ -342,7 +374,7 @@ def jobsites_list(request: Request):
         raise HTTPException(status_code=403, detail="Manager/Admin access required.")
     svc = DatabaseService()
     jobsites = svc.list_jobsites_min(force_refresh=_wants_refresh(request))
-    resp = JSONResponse({"jobsites": jobsites})
+    resp = ok_response(request, {"jobsites": jobsites})
     resp.headers["Cache-Control"] = "no-store"
     return resp
 
@@ -354,7 +386,7 @@ def users_list(request: Request):
         raise HTTPException(status_code=403, detail="Admin access required.")
     svc = DatabaseService()
     users = svc.list_users_min(active_only=False, force_refresh=_wants_refresh(request))
-    resp = JSONResponse({"users": users, "roles": ["coordinator", "driver", "manager", "admin"]})
+    resp = ok_response(request, {"users": users, "roles": ["coordinator", "driver", "manager", "admin"]})
     resp.headers["Cache-Control"] = "no-store"
     return resp
 
@@ -385,7 +417,7 @@ def users_create(payload: UserCreateRequest, request: Request):
     if payload.name and payload.name.strip():
         fields[settings.USERS_NAME_FIELD] = payload.name.strip()
     created = svc.create_user(fields)
-    resp = JSONResponse({"ok": True, "record": created})
+    resp = ok_response(request, {"ok": True, "record": created})
     resp.headers["Cache-Control"] = "no-store"
     return resp
 
@@ -422,7 +454,7 @@ def users_update(record_id: str, payload: UserUpdateRequest, request: Request):
         if not rec:
             raise HTTPException(status_code=404, detail="User not found.")
         updated = svc.update_record(settings.USERS_TABLE, rec.get("id"), fields)
-    resp = JSONResponse({"ok": True, "record": updated})
+    resp = ok_response(request, {"ok": True, "record": updated})
     resp.headers["Cache-Control"] = "no-store"
     return resp
 
@@ -458,7 +490,7 @@ def delivery_get(delivery_id: str, request: Request):
         "window_start": fields.get("Window Start") or "",
         "window_end": fields.get("Window End") or "",
     }
-    resp = JSONResponse({"delivery": payload, "jobsites": jobsites})
+    resp = ok_response(request, {"delivery": payload, "jobsites": jobsites})
     resp.headers["Cache-Control"] = "no-store"
     return resp
 
@@ -478,6 +510,11 @@ class DeliveryUpdateRequest(BaseModel):
     requires_empty_truck: bool | None = False
     window_start: str | None = None
     window_end: str | None = None
+
+    @field_validator("scheduled_date")
+    @classmethod
+    def _validate_scheduled_date(cls, value):
+        return parse_iso_date(value, field_name="scheduled_date", allow_none=False)
 
 
 @router.patch("/deliveries/{delivery_id}")
@@ -514,7 +551,7 @@ def delivery_update(delivery_id: str, payload: DeliveryUpdateRequest, request: R
     else:
         fields["Window End"] = None
     updated = svc.update_record("Deliveries", rec.get("id"), fields)
-    resp = JSONResponse({"ok": True, "record": updated})
+    resp = ok_response(request, {"ok": True, "record": updated})
     resp.headers["Cache-Control"] = "no-store"
     return resp
 
@@ -573,7 +610,7 @@ def solve_run(payload: SolveRunRequest, request: Request):
 
     threading.Thread(target=_runner, daemon=True).start()
 
-    resp = JSONResponse({"job_id": job_id, "status": "queued"})
+    resp = ok_response(request, {"job_id": job_id, "status": "queued"})
     resp.headers["Cache-Control"] = "no-store"
     return resp
 
@@ -586,7 +623,7 @@ def solve_status(job_id: str, request: Request):
     job = _get_solve_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found.")
-    resp = JSONResponse(job)
+    resp = ok_response(request, job)
     resp.headers["Cache-Control"] = "no-store"
     return resp
 
@@ -596,11 +633,11 @@ def plan_published(request: Request, date: str | None = None):
     user = get_current_user(request)
     if not user or user.get("role") not in ("manager", "admin"):
         raise HTTPException(status_code=403, detail="Manager/Admin access required.")
-    plan_date = date or _business_date(offset_days=0)
+    plan_date = _require_iso_date_param(date, "date") if date else _business_date(offset_days=0)
     svc = DatabaseService()
     payload = svc.get_plan_payload(plan_date, "published")
     if not payload:
-        return JSONResponse({"plan_date": plan_date, "plan_type": "published", "published": False})
+        return ok_response(request, {"plan_date": plan_date, "plan_type": "published", "published": False})
     normalized_deliveries = [_normalize_plan_delivery(d) for d in payload.get("deliveries") or []]
 
     meta = payload.get("meta") or {}
@@ -610,7 +647,8 @@ def plan_published(request: Request, date: str | None = None):
         if meta.get("depot_lon") is None:
             meta["depot_lon"] = settings.DEPOT_LON
 
-    resp = JSONResponse(
+    resp = ok_response(
+        request,
         {
             "plan_date": plan_date,
             "plan_type": "published",
@@ -625,7 +663,7 @@ def plan_published(request: Request, date: str | None = None):
             "status": payload.get("status"),
             "updated_at": payload.get("updated_at"),
             "created_at": payload.get("updated_at"),
-        }
+        },
     )
     resp.headers["Cache-Control"] = "no-store"
     return resp
@@ -652,7 +690,7 @@ def plan_published_list(request: Request):
                 "created_at": rec.get("createdTime"),
             }
         )
-    resp = JSONResponse({"items": items})
+    resp = ok_response(request, {"items": items})
     resp.headers["Cache-Control"] = "no-store"
     return resp
 
@@ -697,7 +735,8 @@ def plan_custom_stop_estimate(payload: CustomStopEstimateRequest, request: Reque
     except Exception:
         raise HTTPException(status_code=400, detail="Mapbox matrix returned invalid data.")
 
-    resp = JSONResponse(
+    resp = ok_response(
+        request,
         {
             "ok": True,
             "custom_lat": float(custom_lat),
@@ -708,7 +747,7 @@ def plan_custom_stop_estimate(payload: CustomStopEstimateRequest, request: Reque
             "d_prev_custom": d_prev_custom,
             "d_custom_next": d_custom_next,
             "d_prev_next": d_prev_next,
-        }
+        },
     )
     resp.headers["Cache-Control"] = "no-store"
     return resp
@@ -729,12 +768,13 @@ def delivery_reschedule(delivery_id: str, payload: RescheduleRequest, request: R
     fields = {"Scheduled Date": scheduled_date} if scheduled_date else {"Scheduled Date": None}
     updated = svc.update_record("Deliveries", rec.get("id"), fields)
 
-    resp = JSONResponse(
+    resp = ok_response(
+        request,
         {
             "ok": True,
             "record_id": updated.get("id"),
             "scheduled_date": scheduled_date,
-        }
+        },
     )
     resp.headers["Cache-Control"] = "no-store"
     return resp
@@ -755,13 +795,14 @@ def delivery_ps_delivered(delivery_id: str, payload: PSDeliveredRequest, request
     fields = {settings.DELIVERIES_PS_DELIVERED_FIELD: delivered}
     updated = svc.update_record("Deliveries", rec.get("id"), fields)
 
-    resp = JSONResponse(
+    resp = ok_response(
+        request,
         {
             "ok": True,
             "record_id": updated.get("id"),
             "delivery_id": delivery_id,
             "ps_delivered": delivered,
-        }
+        },
     )
     resp.headers["Cache-Control"] = "no-store"
     return resp
@@ -830,7 +871,7 @@ def deliveries_bulk_create(payload: BulkCreateDeliveriesRequest, request: Reques
         results.append({"ok": True, "index": idx, "record_id": created.get("id")})
 
     ok_count = sum(1 for r in results if r.get("ok"))
-    resp = JSONResponse({"ok": ok_count == len(results), "count": ok_count, "results": results})
+    resp = ok_response(request, {"ok": ok_count == len(results), "count": ok_count, "results": results})
     resp.headers["Cache-Control"] = "no-store"
     return resp
 
@@ -849,7 +890,7 @@ def deliveries_bulk_update(payload: BulkUpdateDeliveriesRequest, request: Reques
     result = svc.bulk_update_deliveries_by_business_id(
         [item.model_dump(exclude_none=True) for item in items]
     )
-    resp = JSONResponse({"ok": True, **result})
+    resp = ok_response(request, {"ok": True, **result})
     resp.headers["Cache-Control"] = "no-store"
     return resp
 
@@ -861,6 +902,6 @@ def deliveries_delete(delivery_id: str, request: Request):
         raise HTTPException(status_code=403, detail="Manager/Admin access required.")
     svc = DatabaseService()
     deleted = svc.delete_record("Deliveries", delivery_id)
-    resp = JSONResponse({"ok": True, "deleted": deleted})
+    resp = ok_response(request, {"ok": True, "deleted": deleted})
     resp.headers["Cache-Control"] = "no-store"
     return resp

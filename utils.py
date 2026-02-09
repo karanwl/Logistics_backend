@@ -1,6 +1,6 @@
 import logging
 import re
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 from zoneinfo import ZoneInfo
 
@@ -44,3 +44,29 @@ def next_plan_date_iso(logger: logging.Logger | None = None) -> str:
                     exc_info=True,
                 )
     return DatabaseService.next_business_date_iso()
+
+
+def parse_iso_date(
+    value: str | date | None,
+    *,
+    field_name: str = "date",
+    allow_none: bool = True,
+    allow_empty: bool = False,
+) -> str | None:
+    if value is None:
+        if allow_none:
+            return None
+        raise ValueError(f"{field_name} is required.")
+    if isinstance(value, date):
+        return value.isoformat()
+    raw = str(value).strip()
+    if not raw:
+        if allow_empty:
+            return ""
+        if allow_none:
+            return None
+        raise ValueError(f"{field_name} is required.")
+    try:
+        return date.fromisoformat(raw).isoformat()
+    except ValueError:
+        raise ValueError(f"{field_name} must be in YYYY-MM-DD format.")

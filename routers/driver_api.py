@@ -5,14 +5,14 @@ import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, UploadFile, File
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from starlette.requests import Request
 
 from auth import clear_session, issue_session, verify_password, get_user_from_token, maybe_upgrade_password
 from config import settings
+from responses import ok_response
 from services import DatabaseService
-from utils import business_date_iso, next_plan_date_iso
+from utils import business_date_iso, next_plan_date_iso, parse_iso_date
 
 
 router = APIRouter(prefix="/api/driver", tags=["driver"])
@@ -39,6 +39,13 @@ def _parse_iso(val: str | None) -> datetime | None:
         return datetime.fromisoformat(str(val).replace("Z", "+00:00"))
     except ValueError:
         return None
+
+
+def _require_iso_date_param(value: str, field_name: str) -> str:
+    try:
+        return parse_iso_date(value, field_name=field_name, allow_none=False)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 def _business_date(offset_days: int = 0) -> str:
@@ -193,7 +200,7 @@ class DriverStatusUpdate(BaseModel):
 
 
 @router.post("/auth/login")
-def driver_login(payload: DriverLoginRequest):
+def driver_login(payload: DriverLoginRequest, request: Request):
     if settings.AUTH_DEBUG:
         logger.info("Driver login input email=%s password_len=%s", payload.email, len(payload.password or ""))
     svc = DatabaseService()
@@ -223,7 +230,8 @@ def driver_login(payload: DriverLoginRequest):
         "name": fields.get(settings.USERS_NAME_FIELD),
         "role": role or "driver",
     }
-    return JSONResponse(
+    return ok_response(
+        request,
         {
             "ok": True,
             "token": session["token"],
@@ -235,7 +243,7 @@ def driver_login(payload: DriverLoginRequest):
                 "name": user.get("name") or user.get("display_name"),
                 "role": user.get("role"),
             },
-        }
+        },
     )
 
 
@@ -243,7 +251,7 @@ def driver_login(payload: DriverLoginRequest):
 def driver_logout(request: Request):
     user = _require_driver(request)
     clear_session(user.get("record_id"))
-    return JSONResponse({"ok": True})
+    return ok_response(request, {"ok": True})
 
 
 @router.get("/route/today")
@@ -256,7 +264,7 @@ def driver_route_today(request: Request, include_all: bool = False):
     plan_date = _resolve_plan_date(svc, None)
     plan = _load_published_plan(svc, plan_date)
     if not plan:
-        return JSONResponse({"published": False, "plan_date": plan_date, "routes": [], "deliveries": []})
+        return ok_response(request, {"published": False, "plan_date": plan_date, "routes": [], "deliveries": []})
 
     routes = _filter_routes_for_driver(plan.get("routes", []), user, include_all)
     delivery_ids = _extract_delivery_ids(routes)
@@ -265,7 +273,8 @@ def driver_route_today(request: Request, include_all: bool = False):
         if str(d.get("id") or "").strip() in delivery_ids
     ]
 
-    resp = JSONResponse(
+    resp = ok_response(
+        request,
         {
             "published": True,
             "plan_date": plan.get("plan_date"),
@@ -273,7 +282,7 @@ def driver_route_today(request: Request, include_all: bool = False):
             "routes": routes,
             "deliveries": deliveries,
             "meta": plan.get("meta") or {},
-        }
+        },
     )
     resp.headers["Cache-Control"] = "no-store"
     return resp
@@ -286,9 +295,10 @@ def driver_route_date(plan_date: str, request: Request, include_all: bool = Fals
         include_all = False
 
     svc = DatabaseService()
+    plan_date = _require_iso_date_param(plan_date, "plan_date")
     plan = _load_published_plan(svc, plan_date)
     if not plan:
-        return JSONResponse({"published": False, "plan_date": plan_date, "routes": [], "deliveries": []})
+        return ok_response(request, {"published": False, "plan_date": plan_date, "routes": [], "deliveries": []})
 
     routes = _filter_routes_for_driver(plan.get("routes", []), user, include_all)
     delivery_ids = _extract_delivery_ids(routes)
@@ -297,7 +307,8 @@ def driver_route_date(plan_date: str, request: Request, include_all: bool = Fals
         if str(d.get("id") or "").strip() in delivery_ids
     ]
 
-    resp = JSONResponse(
+    resp = ok_response(
+        request,
         {
             "published": True,
             "plan_date": plan.get("plan_date"),
@@ -305,7 +316,7 @@ def driver_route_date(plan_date: str, request: Request, include_all: bool = Fals
             "routes": routes,
             "deliveries": deliveries,
             "meta": plan.get("meta") or {},
-        }
+        },
     )
     resp.headers["Cache-Control"] = "no-store"
     return resp
@@ -315,10 +326,10 @@ def driver_route_date(plan_date: str, request: Request, include_all: bool = Fals
 def driver_route_changes(request: Request, since: str | None = None, date: str | None = None):
     user = _require_driver(request)
     svc = DatabaseService()
-    plan_date = _resolve_plan_date(svc, date)
+    plan_date = _require_iso_date_param(date, "date") if date else _resolve_plan_date(svc, date)
     plan = _load_published_plan(svc, plan_date)
     if not plan:
-        return JSONResponse({"published": False, "changed": False, "plan_date": plan_date})
+        return ok_response(request, {"published": False, "changed": False, "plan_date": plan_date})
 
     updated_at = plan.get("updated_at") or plan.get("created_at")
     updated_dt = _parse_iso(updated_at)
@@ -327,13 +338,14 @@ def driver_route_changes(request: Request, since: str | None = None, date: str |
     if updated_dt and since_dt:
         changed = updated_dt > since_dt
 
-    resp = JSONResponse(
+    resp = ok_response(
+        request,
         {
             "published": True,
             "changed": changed,
             "plan_date": plan.get("plan_date"),
             "updated_at": updated_at,
-        }
+        },
     )
     resp.headers["Cache-Control"] = "no-store"
     return resp
@@ -384,7 +396,7 @@ def update_delivery_status(delivery_id: str, payload: DriverStatusUpdate, reques
     if not updated:
         raise HTTPException(status_code=404, detail="Delivery not found.")
 
-    resp = JSONResponse({"ok": True, "delivery_id": delivery_id, "updated_fields": list(fields.keys())})
+    resp = ok_response(request, {"ok": True, "delivery_id": delivery_id, "updated_fields": list(fields.keys())})
     resp.headers["Cache-Control"] = "no-store"
     return resp
 
@@ -424,6 +436,6 @@ async def upload_photo(request: Request, file: UploadFile = File(...)):
             out.write(chunk)
 
     url_path = f"/uploads/{filename}"
-    resp = JSONResponse({"ok": True, "url": url_path, "filename": filename, "bytes": total})
+    resp = ok_response(request, {"ok": True, "url": url_path, "filename": filename, "bytes": total})
     resp.headers["Cache-Control"] = "no-store"
     return resp
