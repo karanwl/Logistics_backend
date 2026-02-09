@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Form
 import html
 import json
 import logging
@@ -375,6 +375,31 @@ def jobsites_list(request: Request):
     svc = DatabaseService()
     jobsites = svc.list_jobsites_min(force_refresh=_wants_refresh(request))
     resp = ok_response(request, {"jobsites": jobsites})
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@router.post("/jobsites/create-json")
+def jobsites_create_json(
+    request: Request,
+    name: str = Form(...),
+    address: str = Form(...),
+):
+    user = get_current_user(request)
+    if not user or user.get("role") not in ("manager", "admin"):
+        raise HTTPException(status_code=403, detail="Manager/Admin access required.")
+    name_clean = (name or "").strip()
+    address_clean = (address or "").strip()
+    if not name_clean or not address_clean:
+        raise HTTPException(status_code=400, detail="Jobsite name and address are required.")
+
+    svc = DatabaseService()
+    fields = {
+        settings.JOBSITES_NAME_FIELD: name_clean,
+        settings.JOBSITES_ADDRESS_FIELD: address_clean,
+    }
+    created = svc.create_record("Jobsites", fields)
+    resp = ok_response(request, {"ok": True, "jobsite": created})
     resp.headers["Cache-Control"] = "no-store"
     return resp
 
