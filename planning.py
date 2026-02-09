@@ -423,11 +423,16 @@ def generate_tomorrow_plan(
         "downtown_late_penalty_per_sec": settings.SOLVER_DOWNTOWN_LATE_PENALTY_PER_SECOND,
         "van_fixed_cost": settings.SOLVER_VAN_FIXED_COST,
         "truck_fixed_cost_physical": settings.SOLVER_TRUCK_FIXED_COST_PHYSICAL,
+        "truck_fixed_cost_second": settings.SOLVER_TRUCK_FIXED_COST_SECOND,
         "truck_fixed_cost_overflow": settings.SOLVER_TRUCK_FIXED_COST_OVERFLOW,
         "drop_node_penalty": settings.SOLVER_DROP_NODE_PENALTY,
         "shift_seconds": settings.SOLVER_SHIFT_SECONDS,
         "waiting_slack_seconds": settings.SOLVER_WAITING_SLACK_SECONDS,
         "search_time_limit_s": settings.SOLVER_TIME_LIMIT_SECONDS,
+        "load_balance_span_cost_coeff": settings.SOLVER_LOAD_BALANCE_COEFFICIENT,
+        "reload_penalty": settings.SOLVER_RELOAD_PENALTY,
+        "reload_service_seconds": settings.SOLVER_RELOAD_SERVICE_SECONDS,
+        "reloads_per_truck": settings.SOLVER_RELOADS_PER_TRUCK,
     }
 
     opt = RouteOptimizer(
