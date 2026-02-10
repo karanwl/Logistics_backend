@@ -636,15 +636,15 @@ class RouteOptimizer:
                     )
                     output = None
                 else:
-                summary = self._summarize_output(output)
-                self._print_search(
-                    "[solver] reduced fleet solution "
-                    f"routes_used={summary['routes_used']} "
-                    f"truck_routes={summary['truck_routes']} van_routes={summary['van_routes']} "
-                    f"total_distance_m={summary['total_distance_m']} total_time_s={summary['total_time_s']} "
-                    f"total_capacity_units={summary['total_capacity_units']}"
-                )
-                return output
+                    summary = self._summarize_output(output)
+                    self._print_search(
+                        "[solver] reduced fleet solution "
+                        f"routes_used={summary['routes_used']} "
+                        f"truck_routes={summary['truck_routes']} van_routes={summary['van_routes']} "
+                        f"total_distance_m={summary['total_distance_m']} total_time_s={summary['total_time_s']} "
+                        f"total_capacity_units={summary['total_capacity_units']}"
+                    )
+                    return output
 
         output = self._solve_model(service_time=service_time, max_route_time=max_route_time)
         if not output:
