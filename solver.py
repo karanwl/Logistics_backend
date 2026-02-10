@@ -79,6 +79,7 @@ class RouteOptimizer:
         self.node_is_downtown = node_is_downtown or {}
         self.node_time_windows = node_time_windows or {}
         self.reload_nodes = []
+        self.base_node_count = len(self.distance_matrix)
 
         # Allow overriding penalties via penalty_profile
         self.penalties = dict(self.DEFAULT_PENALTIES)
@@ -126,16 +127,18 @@ class RouteOptimizer:
             return True
         return False
 
-    def _estimate_reload_count(self) -> int:
+    def _estimate_reload_count(self, truck_count: int | None = None) -> int:
         capacity = int(self.truck_capacity_units or 0)
         if capacity <= 0:
             return 0
-        truck_count = sum(1 for v in self.vehicle_types if v == "truck")
+        if truck_count is None:
+            truck_count = sum(1 for v in self.vehicle_types if v == "truck")
+        truck_count = int(truck_count or 0)
         if truck_count <= 0:
             return 0
 
         total_units = 0
-        for node in range(1, len(self.distance_matrix)):
+        for node in range(1, self.base_node_count):
             if self._node_requires_truck(node):
                 tokens = self.node_to_jobs.get(node, [])
                 for t in tokens:
@@ -171,6 +174,19 @@ class RouteOptimizer:
             return
 
         for _ in range(reload_count):
+            new_idx = len(self.distance_matrix)
+            self._append_depot_clone(self.distance_matrix)
+            self._append_depot_clone(self.duration_matrix)
+            self.node_to_jobs[new_idx] = ["Depot - Reload"]
+            self.node_is_downtown[new_idx] = False
+            self.reload_nodes.append(new_idx)
+
+    def _ensure_reload_nodes_for_truck_count(self, truck_count: int):
+        required = self._estimate_reload_count(truck_count=truck_count)
+        missing = int(required - len(self.reload_nodes))
+        if missing <= 0:
+            return
+        for _ in range(missing):
             new_idx = len(self.distance_matrix)
             self._append_depot_clone(self.distance_matrix)
             self._append_depot_clone(self.duration_matrix)
@@ -674,6 +690,8 @@ class RouteOptimizer:
         self._print_search("[solver] single-model solve started")
         total_trucks = sum(1 for v in self.vehicle_types if v == "truck")
         if total_trucks > 1:
+            # Ensure the 1-truck attempt has enough synthetic reload nodes available.
+            self._ensure_reload_nodes_for_truck_count(1)
             reduced_types = self._build_vehicle_subset(1)
             self._print_search("[solver] trying reduced fleet (1 truck + all vans)")
             output = self._solve_model(
