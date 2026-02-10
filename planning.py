@@ -133,6 +133,78 @@ def _build_nodes_and_coords(deliveries) -> Tuple[List[Tuple[float, float]], Dict
     node_to_jobs: Dict[int, List[str]] = {0: ["Depot"]}
 
     capacity_units = _vehicle_capacity_units()
+    med_units = _med_skid_units()
+    large_units = _large_skid_units()
+    small_units = _small_skid_units()
+    frame_units = _frame_units()
+
+    def _split_delivery_parts(
+        med_qty: int,
+        large_qty: int,
+        small_qty: int,
+        frame_qty: int,
+        exp_frame_qty: int,
+        door_qty: int,
+        box_qty: int,
+    ) -> List[Dict[str, int]]:
+        remaining = {
+            "med": max(0, int(med_qty)),
+            "large": max(0, int(large_qty)),
+            "small": max(0, int(small_qty)),
+            "frame": max(0, int(frame_qty)),
+            "exp": max(0, int(exp_frame_qty)),
+        }
+        weights = {
+            "large": max(1, int(large_units)),
+            "med": max(1, int(med_units)),
+            "small": max(1, int(small_units)),
+            "frame": max(1, int(frame_units)),
+            "exp": max(1, int(frame_units)),
+        }
+        order = ["large", "med", "small", "frame", "exp"]
+
+        parts: List[Dict[str, int]] = []
+        while any(remaining[k] > 0 for k in remaining):
+            part = {"med": 0, "large": 0, "small": 0, "frame": 0, "exp": 0, "door": 0, "box": 0}
+            cap = int(capacity_units)
+            for key in order:
+                if remaining[key] <= 0:
+                    continue
+                weight = weights[key]
+                if weight <= 0:
+                    continue
+                max_fit = cap // weight
+                if max_fit <= 0:
+                    continue
+                take = min(remaining[key], max_fit)
+                if take > 0:
+                    part[key] = int(take)
+                    remaining[key] -= int(take)
+                    cap -= int(take) * weight
+
+            if all(part[k] == 0 for k in ["med", "large", "small", "frame", "exp"]):
+                # Fallback: force at least one item if capacity is unexpectedly too small.
+                for key in order:
+                    if remaining[key] > 0:
+                        part[key] = 1
+                        remaining[key] -= 1
+                        break
+
+            parts.append(part)
+
+        if parts:
+            # Distribute non-capacity items across parts (integer, round-robin).
+            for key, qty in [("door", door_qty), ("box", box_qty)]:
+                qty = max(0, int(qty))
+                if qty <= 0:
+                    continue
+                idx = 0
+                while qty > 0:
+                    parts[idx % len(parts)][key] += 1
+                    idx += 1
+                    qty -= 1
+
+        return parts
 
     groups: Dict[Tuple[float, float], List[Any]] = {}
     for d in deliveries:
@@ -154,6 +226,13 @@ def _build_nodes_and_coords(deliveries) -> Tuple[List[Tuple[float, float]], Dict
 
         for j in jobs:
             units = delivery_capacity_units(j)
+            med_qty = int(getattr(j, "med_skid", getattr(j, "skid", 0)) or 0)
+            large_qty = int(getattr(j, "large_skid", 0) or 0)
+            small_qty = int(getattr(j, "small_skid", 0) or 0)
+            frame_qty = int(getattr(j, "frame", 0) or 0)
+            exp_frame_qty = int(getattr(j, "exp_frame", 0) or 0)
+            door_qty = int(getattr(j, "door", 0) or 0)
+            box_qty = int(getattr(j, "box", 0) or 0)
 
             # Single delivery exceeds per-stop capacity => split into multiple parts at same coord
             if units > capacity_units:
@@ -163,14 +242,29 @@ def _build_nodes_and_coords(deliveries) -> Tuple[List[Tuple[float, float]], Dict
                     curr_tokens = []
                     curr_units = 0
 
-                rem_units = units
+                parts = _split_delivery_parts(
+                    med_qty,
+                    large_qty,
+                    small_qty,
+                    frame_qty,
+                    exp_frame_qty,
+                    door_qty,
+                    box_qty,
+                )
                 p = 1
-                while rem_units > 0:
-                    chunk = min(rem_units, capacity_units)
-                    # Encode in token so UI can display split and solver can reason if it wants.
-                    node_to_jobs[len(coords_list)] = [f"{j.id}_Part{p}_Units{chunk}"]
+                for part in parts:
+                    token = (
+                        f"{j.id}_Part{p}"
+                        f"_Med{part['med']}"
+                        f"_Large{part['large']}"
+                        f"_Small{part['small']}"
+                        f"_Frame{part['frame']}"
+                        f"_Exp{part['exp']}"
+                        f"_Door{part['door']}"
+                        f"_Box{part['box']}"
+                    )
+                    node_to_jobs[len(coords_list)] = [token]
                     coords_list.append(coord)
-                    rem_units -= chunk
                     p += 1
 
             else:
@@ -280,6 +374,41 @@ def _format_routes_for_ui(routes, deliveries):
                 if "_Units" in t:
                     try:
                         item["units"] = int(t.split("_Units")[-1])
+                    except (ValueError, IndexError):
+                        pass
+                if "_Med" in t:
+                    try:
+                        item["med_skid"] = int(t.split("_Med")[-1].split("_", 1)[0])
+                    except (ValueError, IndexError):
+                        pass
+                if "_Large" in t:
+                    try:
+                        item["large_skid"] = int(t.split("_Large")[-1].split("_", 1)[0])
+                    except (ValueError, IndexError):
+                        pass
+                if "_Small" in t:
+                    try:
+                        item["small_skid"] = int(t.split("_Small")[-1].split("_", 1)[0])
+                    except (ValueError, IndexError):
+                        pass
+                if "_Frame" in t:
+                    try:
+                        item["frame"] = int(t.split("_Frame")[-1].split("_", 1)[0])
+                    except (ValueError, IndexError):
+                        pass
+                if "_Exp" in t:
+                    try:
+                        item["exp_frame"] = int(t.split("_Exp")[-1].split("_", 1)[0])
+                    except (ValueError, IndexError):
+                        pass
+                if "_Door" in t:
+                    try:
+                        item["door"] = int(t.split("_Door")[-1].split("_", 1)[0])
+                    except (ValueError, IndexError):
+                        pass
+                if "_Box" in t:
+                    try:
+                        item["box"] = int(t.split("_Box")[-1].split("_", 1)[0])
                     except (ValueError, IndexError):
                         pass
 

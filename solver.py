@@ -220,6 +220,7 @@ class RouteOptimizer:
           - "{id}_Part{p}_Units{u}"
           - "{id}_Part{p}_Qty{q}" (legacy: q med skids -> q*MED_SKID_UNITS)
           - "{id}_Part{p}_Big{b}_Small{s}" (units=b*MED_SKID_UNITS+s*SMALL_SKID_UNITS)
+          - "{id}_Part{p}_Med{m}_Large{l}_Small{s}_Frame{f}_Exp{e}_Door{d}_Box{b}"
           - "{id}" (units fallback from delivery fields)
         """
         token = str(token).strip()
@@ -242,6 +243,16 @@ class RouteOptimizer:
                 return (base, part_no, max(0, units))
             except (ValueError, IndexError):
                 pass
+
+        token_counts = self._token_item_counts(token)
+        if token_counts:
+            units = (
+                (token_counts["med"] * self.med_skid_units)
+                + (token_counts["large"] * self.large_skid_units)
+                + (token_counts["small"] * self.small_skid_units)
+                + ((token_counts["frame"] + token_counts["exp"]) * self.frame_units)
+            )
+            return (base, part_no, max(0, int(units)))
 
         if "_Qty" in token:
             try:
@@ -267,6 +278,30 @@ class RouteOptimizer:
         units = (big_qty * self.med_skid_units) + (small_qty * self.small_skid_units)
         return (base, part_no, max(0, int(units)))
 
+    def _token_item_counts(self, token: str) -> dict | None:
+        def _parse_field(field: str) -> int | None:
+            key = f"_{field}"
+            if key not in token:
+                return None
+            try:
+                val = token.split(key, 1)[1].split("_", 1)[0]
+                return max(0, int(val))
+            except (ValueError, IndexError):
+                return None
+
+        fields = ["Med", "Large", "Small", "Frame", "Exp", "Door", "Box"]
+        parsed = {}
+        found = False
+        for field in fields:
+            val = _parse_field(field)
+            if val is not None:
+                found = True
+                parsed[field.lower()] = val
+            else:
+                parsed[field.lower()] = 0
+
+        return parsed if found else None
+
     def _node_cargo_summary(self, node_idx: int) -> tuple[int, int, int, bool]:
         """
         Sum door/frame/exp_frame counts (plus skid presence) for all deliveries at this node.
@@ -279,6 +314,23 @@ class RouteOptimizer:
 
         tokens = self.node_to_jobs.get(node_idx, [])
         for tok in tokens:
+            token_counts = self._token_item_counts(str(tok))
+            if token_counts:
+                med_qty = int(token_counts.get("med", 0) or 0)
+                large_qty = int(token_counts.get("large", 0) or 0)
+                small_qty = int(token_counts.get("small", 0) or 0)
+                frame_qty = int(token_counts.get("frame", 0) or 0)
+                exp_qty = int(token_counts.get("exp", 0) or 0)
+                door_qty = int(token_counts.get("door", 0) or 0)
+
+                if med_qty > 0 or large_qty > 0 or small_qty > 0:
+                    skid_present = True
+                small_skid_total += small_qty
+                door_total += door_qty
+                frame_total += frame_qty
+                exp_frame_total += exp_qty
+                continue
+
             base_id, _, _ = self._parse_token(tok)
             if not base_id:
                 continue
