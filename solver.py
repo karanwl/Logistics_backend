@@ -1,5 +1,6 @@
 import logging
 
+import math
 from ortools.constraint_solver import pywrapcp, routing_enums_pb2
 from config import settings
 
@@ -8,9 +9,7 @@ logger = logging.getLogger(__name__)
 
 class RouteOptimizer:
     """
-    IMPORTANT CAPACITY MODEL (Skids + Frames)
-    ----------------------------------------
-    We normalize load into a shared "capacity_units" scale:
+    Normalize load into a shared "capacity_units" scale:
 
       - 1 med skid   = 20 units
       - 1 large skid = 25 units
@@ -22,7 +21,7 @@ class RouteOptimizer:
     Van truck-only constraints stay controlled by truck_req_cb rules.
     """
 
-    # Defaults (kept here so solver is self-contained)
+    # Defaults
     MED_SKID_UNITS = 20
     LARGE_SKID_UNITS = 25
     SMALL_SKID_UNITS = 10
@@ -42,9 +41,9 @@ class RouteOptimizer:
         "downtown_late_penalty_per_sec": 60,
         "van_fixed_cost": 0,
         "truck_fixed_cost_physical": 500,
-        "truck_fixed_cost_overflow": 1000000,
-        "drop_node_penalty": 1000000,
-        "shift_seconds": 7.5 * 3600,
+        "truck_fixed_cost_overflow": 50000,
+        "drop_node_penalty": 100000,
+        "shift_seconds": 7.7 * 3600,
         "waiting_slack_seconds": 600,
         "search_time_limit_s": 30,
         "search_print_results": True,
@@ -79,6 +78,7 @@ class RouteOptimizer:
 
         self.node_is_downtown = node_is_downtown or {}
         self.node_time_windows = node_time_windows or {}
+        self.reload_nodes = []
 
         # Allow overriding penalties via penalty_profile
         self.penalties = dict(self.DEFAULT_PENALTIES)
@@ -99,6 +99,8 @@ class RouteOptimizer:
             int(getattr(settings, "VEHICLE_CAPACITY_UNITS", self.TRUCK_CAPACITY_UNITS)),
         )
 
+        self._auto_add_reload_nodes()
+
     # ---------------------------
     # Utility / data access
     # ---------------------------
@@ -107,6 +109,84 @@ class RouteOptimizer:
             [int(round(val)) if (val is not None and val < 10**7) else 999999 for val in row]
             for row in matrix
         ]
+
+    def _node_requires_truck(self, node: int) -> bool:
+        if node in self.reload_nodes:
+            return True
+        door_total, frame_total, exp_frame_total, skid_present = self._node_cargo_summary(node)
+        if self._node_requires_empty_pickup(node):
+            return True
+        if skid_present:
+            return True
+        if (
+            door_total > self.VAN_DOOR_LIMIT
+            or frame_total > self.VAN_FRAME_LIMIT
+            or exp_frame_total > self.VAN_EXP_FRAME_LIMIT
+        ):
+            return True
+        return False
+
+    def _estimate_reload_count(self) -> int:
+        capacity = int(self.truck_capacity_units or 0)
+        if capacity <= 0:
+            return 0
+
+        total_units = 0
+        for node in range(1, len(self.distance_matrix)):
+            if self._node_requires_truck(node):
+                tokens = self.node_to_jobs.get(node, [])
+                for t in tokens:
+                    deliv_id, _, units = self._parse_token(t)
+                    d = self.delivery_by_id.get(deliv_id) if deliv_id else None
+                    pickup_flag = bool(self._delivery_field(d, "pickup", False)) if d else False
+                    if pickup_flag:
+                        continue
+                    if units:
+                        unit_val = int(units)
+                    elif d:
+                        unit_val = self._delivery_units(d)
+                    else:
+                        unit_val = 0
+                    total_units += max(0, int(unit_val))
+
+        if total_units <= capacity:
+            return 0
+        return max(0, int(math.ceil(total_units / capacity) - 1))
+
+    def _append_depot_clone(self, matrix: list[list[int]]):
+        depot_row = list(matrix[self.depot])
+        for i in range(len(matrix)):
+            matrix[i].append(matrix[i][self.depot])
+        matrix.append(depot_row + [depot_row[self.depot]])
+
+    def _auto_add_reload_nodes(self):
+        reload_count = self._estimate_reload_count()
+        if reload_count <= 0:
+            return
+
+        for _ in range(reload_count):
+            new_idx = len(self.distance_matrix)
+            self._append_depot_clone(self.distance_matrix)
+            self._append_depot_clone(self.duration_matrix)
+            self.node_to_jobs[new_idx] = ["DepotReload"]
+            self.node_is_downtown[new_idx] = False
+            self.reload_nodes.append(new_idx)
+
+    def _build_vehicle_subset(self, max_trucks: int) -> list[str]:
+        """
+        Keep vehicle order but cap how many trucks are included.
+        Non-truck vehicles are always retained.
+        """
+        subset = []
+        trucks_seen = 0
+        for v_type in self.vehicle_types:
+            if v_type == "truck":
+                if trucks_seen < max_trucks:
+                    subset.append(v_type)
+                    trucks_seen += 1
+            else:
+                subset.append(v_type)
+        return subset
 
     def _delivery_id(self, d) -> str:
         if isinstance(d, dict):
@@ -263,10 +343,16 @@ class RouteOptimizer:
             "total_capacity_units": sum(int(r.get("capacity_units", r.get("skids", 0)) or 0) for r in output),
         }
 
-    def _solve_model(self, service_time=1200, max_route_time=43200):
+    def _solve_model(self, service_time=1200, max_route_time=43200, vehicle_types=None, physical_truck_count=None):
+        vehicle_types = vehicle_types or self.vehicle_types
+        physical_truck_count = (
+            self.physical_truck_count
+            if physical_truck_count is None
+            else int(physical_truck_count)
+        )
         manager = pywrapcp.RoutingIndexManager(
             len(self.distance_matrix),
-            len(self.vehicle_types),
+            len(vehicle_types),
             self.depot
         )
         routing = pywrapcp.RoutingModel(manager)
@@ -278,6 +364,8 @@ class RouteOptimizer:
             node_idx = manager.IndexToNode(from_idx)
             if node_idx == self.depot:
                 return 0
+            if node_idx in self.reload_nodes:
+                return 1
 
             door_total, frame_total, exp_frame_total, skid_present = self._node_cargo_summary(node_idx)
             if skid_present:
@@ -294,6 +382,8 @@ class RouteOptimizer:
             node_idx = manager.IndexToNode(from_idx)
             if node_idx == self.depot:
                 return 0
+            if node_idx in self.reload_nodes:
+                return int(self.truck_capacity_units)
 
             tokens = self.node_to_jobs.get(node_idx, [])
             total_units = 0
@@ -330,40 +420,13 @@ class RouteOptimizer:
 
             return vehicle_unit_cb
 
-        def node_requires_truck(node: int) -> bool:
-            door_total, frame_total, exp_frame_total, skid_present = self._node_cargo_summary(node)
-            if self._node_requires_empty_pickup(node):
-                return True
-            if skid_present:
-                return True
-            if (
-                door_total > self.VAN_DOOR_LIMIT
-                or frame_total > self.VAN_FRAME_LIMIT
-                or exp_frame_total > self.VAN_EXP_FRAME_LIMIT
-            ):
-                return True
-            return False
-
-        def node_units(node: int) -> int:
-            tokens = self.node_to_jobs.get(node, [])
-            total = 0
-            for t in tokens:
-                deliv_id, _, units = self._parse_token(t)
-                if units:
-                    total += int(units)
-                elif deliv_id:
-                    d = self.delivery_by_id.get(deliv_id)
-                    if d:
-                        total += self._delivery_units(d)
-            return int(total)
-
         van_eligible = [False] * len(self.distance_matrix)
         for node in range(1, len(self.distance_matrix)):
-            van_eligible[node] = not node_requires_truck(node)
+            van_eligible[node] = not self._node_requires_truck(node)
 
         truck_idx = routing.RegisterUnaryTransitCallback(truck_req_cb)
         unit_cbs = []
-        for v_type in self.vehicle_types:
+        for v_type in vehicle_types:
             cb_idx = routing.RegisterTransitCallback(make_vehicle_unit_cb(v_type == "truck"))
             unit_cbs.append(cb_idx)
 
@@ -392,7 +455,7 @@ class RouteOptimizer:
                 return scaled
             return cost_cb
 
-        for v_id, v_type in enumerate(self.vehicle_types):
+        for v_id, v_type in enumerate(vehicle_types):
             is_truck = (v_type == "truck")
             cost_idx = routing.RegisterTransitCallback(make_vehicle_cost_cb(is_truck))
             routing.SetArcCostEvaluatorOfVehicle(cost_idx, v_id)
@@ -416,7 +479,7 @@ class RouteOptimizer:
             return vtime_cb
 
         time_cbs = []
-        for v_id, v_type in enumerate(self.vehicle_types):
+        for v_id, v_type in enumerate(vehicle_types):
             is_truck = (v_type == "truck")
             cb_idx = routing.RegisterTransitCallback(make_vehicle_time_cb(is_truck))
             time_cbs.append(cb_idx)
@@ -430,13 +493,13 @@ class RouteOptimizer:
         routing.AddDimensionWithVehicleTransitAndCapacity(
             time_cbs,
             WAITING_SLACK,
-            [SHIFT_SECONDS] * len(self.vehicle_types),
+            [SHIFT_SECONDS] * len(vehicle_types),
             True,
             "Time"
         )
         time_dim = routing.GetDimensionOrDie("Time")
 
-        for v_id in range(len(self.vehicle_types)):
+        for v_id in range(len(vehicle_types)):
             time_dim.CumulVar(routing.End(v_id)).SetMax(SHIFT_SECONDS)
 
         time_dim.SetGlobalSpanCostCoefficient(int(self.penalties["time_span_cost_coeff"]))
@@ -444,10 +507,10 @@ class RouteOptimizer:
         # ---------------------------
         # Truck-only + Skids capacity
         # ---------------------------
-        truck_caps = [999 if v == "truck" else 0 for v in self.vehicle_types]
+        truck_caps = [999 if v == "truck" else 0 for v in vehicle_types]
         routing.AddDimensionWithVehicleCapacity(truck_idx, 0, truck_caps, True, "TruckOnly")
 
-        unit_caps = [self.truck_capacity_units if v == "truck" else 0 for v in self.vehicle_types]
+        unit_caps = [self.truck_capacity_units if v == "truck" else 0 for v in vehicle_types]
         routing.AddDimensionWithVehicleTransitAndCapacity(unit_cbs, 0, unit_caps, False, "Skids")
         skid_dim = routing.GetDimensionOrDie("Skids")
 
@@ -457,9 +520,9 @@ class RouteOptimizer:
             if self._node_requires_empty_pickup(node)
         ]
         if pickup_empty_nodes:
-            truck_vehicle_ids = [int(idx) for idx, v_type in enumerate(self.vehicle_types) if v_type == "truck"]
+            truck_vehicle_ids = [int(idx) for idx, v_type in enumerate(vehicle_types) if v_type == "truck"]
             solver = routing.solver()
-            ends = [routing.End(v_id) for v_id in range(len(self.vehicle_types))]
+            ends = [routing.End(v_id) for v_id in range(len(vehicle_types))]
             for node in pickup_empty_nodes:
                 idx = int(manager.NodeToIndex(node))
                 if truck_vehicle_ids:
@@ -500,6 +563,11 @@ class RouteOptimizer:
             idx = manager.NodeToIndex(node)
             time_dim.CumulVar(idx).SetRange(int(tw_start), int(tw_end))
 
+        if self.reload_nodes:
+            for node in self.reload_nodes:
+                idx = manager.NodeToIndex(node)
+                time_dim.CumulVar(idx).SetRange(0, SHIFT_SECONDS)
+
         # ---------------------------
         # Fixed costs
         # ---------------------------
@@ -508,19 +576,23 @@ class RouteOptimizer:
         TRUCK_FIXED_COST_OVERFLOW = int(self.penalties["truck_fixed_cost_overflow"])
 
         truck_seen = 0
-        for v_id, v_type in enumerate(self.vehicle_types):
+        for v_id, v_type in enumerate(vehicle_types):
             if v_type == "van":
                 routing.SetFixedCostOfVehicle(VAN_FIXED_COST, v_id)
             else:
                 truck_seen += 1
-                cost = TRUCK_FIXED_COST_PHYSICAL if truck_seen <= self.physical_truck_count else TRUCK_FIXED_COST_OVERFLOW
+                cost = TRUCK_FIXED_COST_PHYSICAL if truck_seen <= physical_truck_count else TRUCK_FIXED_COST_OVERFLOW
                 routing.SetFixedCostOfVehicle(cost, v_id)
 
         # ---------------------------
         # Allow dropping any non-depot node
         # ---------------------------
         for node in range(1, len(self.distance_matrix)):
-            routing.AddDisjunction([manager.NodeToIndex(node)], int(self.penalties["drop_node_penalty"]))
+            idx = manager.NodeToIndex(node)
+            if node in self.reload_nodes:
+                routing.AddDisjunction([idx], 0)
+            else:
+                routing.AddDisjunction([idx], int(self.penalties["drop_node_penalty"]))
 
         # ---------------------------
         # Search parameters
@@ -534,7 +606,7 @@ class RouteOptimizer:
         if not solution:
             return None
 
-        output = self._format_output(manager, routing, solution)
+        output = self._format_output(manager, routing, solution, vehicle_types=vehicle_types)
         if output is None:
             return None
 
@@ -545,6 +617,27 @@ class RouteOptimizer:
     # ---------------------------
     def solve(self, service_time=1200, max_route_time=43200):
         self._print_search("[solver] single-model solve started")
+        total_trucks = sum(1 for v in self.vehicle_types if v == "truck")
+        if total_trucks > 1:
+            reduced_types = self._build_vehicle_subset(1)
+            self._print_search("[solver] trying reduced fleet (1 truck + all vans)")
+            output = self._solve_model(
+                service_time=service_time,
+                max_route_time=max_route_time,
+                vehicle_types=reduced_types,
+                physical_truck_count=min(self.physical_truck_count, 1),
+            )
+            if output:
+                summary = self._summarize_output(output)
+                self._print_search(
+                    "[solver] reduced fleet solution "
+                    f"routes_used={summary['routes_used']} "
+                    f"truck_routes={summary['truck_routes']} van_routes={summary['van_routes']} "
+                    f"total_distance_m={summary['total_distance_m']} total_time_s={summary['total_time_s']} "
+                    f"total_capacity_units={summary['total_capacity_units']}"
+                )
+                return output
+
         output = self._solve_model(service_time=service_time, max_route_time=max_route_time)
         if not output:
             self._print_search("[solver] no solution")
@@ -562,7 +655,7 @@ class RouteOptimizer:
     # ---------------------------
     # Output formatting (unchanged structure)
     # ---------------------------
-    def _format_output(self, manager, routing, solution):
+    def _format_output(self, manager, routing, solution, vehicle_types=None):
         """
         Output structure kept intact:
           - returns list of dicts with keys: v_id, v_type, jobs, skids
@@ -590,7 +683,8 @@ class RouteOptimizer:
             m = (seconds % 3600) // 60
             return f"{h:02d}:{m:02d}"
 
-        for v_id, v_type in enumerate(self.vehicle_types):
+        vehicle_types = vehicle_types or self.vehicle_types
+        for v_id, v_type in enumerate(vehicle_types):
             index = routing.Start(v_id)
             plan = []
             stops = []
