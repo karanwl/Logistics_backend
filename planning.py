@@ -343,6 +343,9 @@ def _format_routes_for_ui(routes, deliveries):
                 if t.lower() == "depot":
                     stop_items.append({"type": "depot", "label": "Depot"})
                     continue
+                if t.lower() == "depot - reload":
+                    stop_items.append({"type": "depot", "label": "Depot - Reload"})
+                    continue
 
                 base_id = t.split("_Part")[0].strip()
                 d = delivery_by_id.get(base_id)
