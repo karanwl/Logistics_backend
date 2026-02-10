@@ -635,8 +635,8 @@ class RouteOptimizer:
             if v_type != "van":
                 continue
             end_idx = routing.End(v_id)
-            skid_zero = solver.MakeIsEqualCstVar(skid_presence_dim.CumulVar(end_idx), 0)
-            door_zero = solver.MakeIsEqualCstVar(doorframe_presence_dim.CumulVar(end_idx), 0)
+            skid_zero = solver.IsEqualCstVar(skid_presence_dim.CumulVar(end_idx), 0)
+            door_zero = solver.IsEqualCstVar(doorframe_presence_dim.CumulVar(end_idx), 0)
             solver.Add(skid_zero + door_zero >= 1)
 
         pickup_empty_nodes = [
