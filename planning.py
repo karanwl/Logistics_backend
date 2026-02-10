@@ -293,6 +293,8 @@ def _format_routes_for_ui(routes, deliveries):
                     "departure_hhmm": meta.get("departure_hhmm"),
                     "arrival_s": meta.get("arrival_s"),
                     "departure_s": meta.get("departure_s"),
+                    "stop_units": meta.get("stop_units"),
+                    "stop_units_signed": meta.get("stop_units_signed"),
                 }
             )
 

@@ -628,6 +628,14 @@ class RouteOptimizer:
                 physical_truck_count=min(self.physical_truck_count, 1),
             )
             if output:
+                dropped_count = int(output[0].get("dropped_count", 0) or 0)
+                if dropped_count > 0:
+                    self._print_search(
+                        "[solver] reduced fleet dropped nodes; retrying with full fleet "
+                        f"dropped_count={dropped_count}"
+                    )
+                    output = None
+                else:
                 summary = self._summarize_output(output)
                 self._print_search(
                     "[solver] reduced fleet solution "
@@ -683,7 +691,29 @@ class RouteOptimizer:
             m = (seconds % 3600) // 60
             return f"{h:02d}:{m:02d}"
 
+        def stop_unit_summary(node: int) -> tuple[int, int]:
+            if node == self.depot:
+                return 0, 0
+            tokens = self.node_to_jobs.get(node, [])
+            signed_units = 0
+            abs_units = 0
+            for t in tokens:
+                deliv_id, _, units = self._parse_token(t)
+                d = self.delivery_by_id.get(deliv_id) if deliv_id else None
+                pickup_flag = bool(self._delivery_field(d, "pickup", False)) if d else False
+                if units:
+                    unit_val = int(units)
+                elif d:
+                    unit_val = self._delivery_units(d)
+                else:
+                    unit_val = 0
+                if unit_val:
+                    signed_units += unit_val if pickup_flag else -unit_val
+                    abs_units += abs(int(unit_val))
+            return abs_units, signed_units
+
         vehicle_types = vehicle_types or self.vehicle_types
+        visited_nodes = set()
         for v_id, v_type in enumerate(vehicle_types):
             index = routing.Start(v_id)
             plan = []
@@ -696,9 +726,12 @@ class RouteOptimizer:
                 next_node = manager.IndexToNode(next_index)
 
                 plan.append(self.node_to_jobs.get(node, ["Depot"]))
+                if node != self.depot:
+                    visited_nodes.add(int(node))
 
                 arr = solution.Value(time_dim.CumulVar(index))
                 dep = arr + svc_for(v_type, node)
+                stop_units, stop_units_signed = stop_unit_summary(node)
 
                 stops.append({
                     "node": node,
@@ -707,6 +740,8 @@ class RouteOptimizer:
                     "departure_s": int(dep),
                     "arrival_hhmm": fmt_hhmm(int(arr)),
                     "departure_hhmm": fmt_hhmm(int(dep)),
+                    "stop_units": int(stop_units),
+                    "stop_units_signed": int(stop_units_signed),
                 })
 
                 total_distance += int(self.distance_matrix[node][next_node])
@@ -723,6 +758,8 @@ class RouteOptimizer:
                 "departure_s": int(end_arr),
                 "arrival_hhmm": fmt_hhmm(int(end_arr)),
                 "departure_hhmm": fmt_hhmm(int(end_arr)),
+                "stop_units": 0,
+                "stop_units_signed": 0,
             })
 
             if len(plan) > 2:
@@ -737,5 +774,16 @@ class RouteOptimizer:
                     "total_time_s": int(end_arr),
                     "stops": stops,
                 })
+
+        required_nodes = {
+            int(n)
+            for n in range(1, len(self.distance_matrix))
+            if n not in self.reload_nodes
+        }
+        dropped_nodes = sorted(required_nodes - visited_nodes)
+        if res:
+            for r in res:
+                r["dropped_nodes"] = dropped_nodes
+                r["dropped_count"] = len(dropped_nodes)
 
         return res
