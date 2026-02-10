@@ -607,6 +607,16 @@ class RouteOptimizer:
                 # Must arrive empty; do not force route end so the same truck can continue if feasible.
                 skid_dim.CumulVar(idx).SetValue(0)
 
+        if self.reload_nodes:
+            # Reload nodes are only meaningful when followed by additional work.
+            # Prevent routes from ending immediately after a depot-reload stop.
+            solver = routing.solver()
+            ends = [routing.End(v_id) for v_id in range(len(vehicle_types))]
+            for node in self.reload_nodes:
+                idx = int(manager.NodeToIndex(node))
+                end_for_vehicle = solver.Element(ends, routing.VehicleVar(idx))
+                solver.Add(routing.NextVar(idx) != end_for_vehicle)
+
         # ---------------------------
         # Downtown-first (hard + soft)
         # ---------------------------
