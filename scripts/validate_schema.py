@@ -18,6 +18,7 @@ EXPECTED_TABLES = {
         "Small Skid": {"types": {"integer"}},
         "Large Skid": {"types": {"integer"}},
         "Pickup": {"types": {"boolean"}},
+        "Pickup Vehicle": {"types": {"text", "character varying"}},
         "Requires Empty Truck": {"types": {"boolean"}},
         "Door": {"types": {"integer"}},
         "Frame": {"types": {"integer"}},

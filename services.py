@@ -125,6 +125,21 @@ class DatabaseService:
         return val in ("true", "yes", "1", "checked", "y")
 
     @staticmethod
+    def _normalize_pickup_vehicle(value) -> str:
+        if value is None:
+            return ""
+        raw = str(value).strip().lower()
+        if not raw:
+            return ""
+        if raw in ("van", "vans", "van-only", "van only", "van_only"):
+            return "van"
+        if raw in ("truck", "trucks", "truck-only", "truck only", "truck_only"):
+            return "truck"
+        if raw in ("both", "any", "either", "all", "van/truck", "truck/van"):
+            return "both"
+        return ""
+
+    @staticmethod
     def _normalize_address(value: str) -> str:
         if not value:
             return ""
@@ -216,6 +231,9 @@ class DatabaseService:
             "Exp Frame": delivery.exp_frame,
             "Box": delivery.box,
             "Pickup": bool(delivery.pickup) if delivery.pickup is not None else False,
+            settings.DELIVERIES_PICKUP_VEHICLE_FIELD: (
+                str(getattr(delivery, "pickup_vehicle", "") or "").strip() or None
+            ),
             "Requires Empty Truck": bool(delivery.requires_empty_truck) if delivery.requires_empty_truck is not None else False,
             settings.DELIVERIES_DRIVER_FIELD: delivery.drivers,
             settings.DELIVERIES_DRIVER_NOTES_FIELD: delivery.delivery_notes,
@@ -514,6 +532,8 @@ class DatabaseService:
                 delivery.large_skid = self._coerce_int(value)
             elif key == "Pickup":
                 delivery.pickup = self._to_bool(value)
+            elif key == settings.DELIVERIES_PICKUP_VEHICLE_FIELD or key == "Pickup Vehicle":
+                delivery.pickup_vehicle = self._normalize_pickup_vehicle(value)
             elif key == "Requires Empty Truck":
                 delivery.requires_empty_truck = self._to_bool(value)
             elif key == "Door":
@@ -742,6 +762,8 @@ class DatabaseService:
                     delivery.large_skid = self._coerce_int(item.get("large_skid"))
                 if "pickup" in item:
                     delivery.pickup = self._to_bool(item.get("pickup"))
+                if "pickup_vehicle" in item:
+                    delivery.pickup_vehicle = self._normalize_pickup_vehicle(item.get("pickup_vehicle"))
                 if "requires_empty_truck" in item:
                     delivery.requires_empty_truck = self._to_bool(item.get("requires_empty_truck"))
                 if "door" in item:
@@ -981,6 +1003,12 @@ class DatabaseService:
             packing_slip = self._first_str(fields.get(settings.DELIVERIES_PACKING_SLIP_FIELD))
             driver = self._first_str(fields.get(settings.DELIVERIES_DRIVER_FIELD))
             ps_delivered = self._to_bool(fields.get(settings.DELIVERIES_PS_DELIVERED_FIELD))
+            pickup_flag = self._to_bool(fields.get("Pickup"))
+            pickup_vehicle = self._normalize_pickup_vehicle(fields.get(settings.DELIVERIES_PICKUP_VEHICLE_FIELD))
+            if pickup_flag and not pickup_vehicle:
+                pickup_vehicle = "both"
+            if not pickup_flag:
+                pickup_vehicle = ""
 
             out.append({
                 "record_id": rec.get("id"),
@@ -1000,7 +1028,8 @@ class DatabaseService:
                 "exp_frame": self._first_str(fields.get("Exp Frame")),
                 "door": self._first_str(fields.get("Door")),
                 "box": self._first_str(fields.get("Box")),
-                "pickup": self._to_bool(fields.get("Pickup")),
+                "pickup": pickup_flag,
+                "pickup_vehicle": pickup_vehicle,
                 "requires_empty_truck": self._to_bool(fields.get("Requires Empty Truck")),
                 "window_start": self._first_str(fields.get("Window Start")),
                 "window_end": self._first_str(fields.get("Window End")),
@@ -1228,6 +1257,11 @@ class DatabaseService:
             large_skid = _to_int(fields.get("Large Skid", 0))
             box = _to_int(fields.get("Box", 0))
             pickup = self._to_bool(fields.get("Pickup"))
+            pickup_vehicle = self._normalize_pickup_vehicle(fields.get(settings.DELIVERIES_PICKUP_VEHICLE_FIELD))
+            if pickup and not pickup_vehicle:
+                pickup_vehicle = "both"
+            if not pickup:
+                pickup_vehicle = ""
             requires_empty_truck = self._to_bool(fields.get("Requires Empty Truck"))
 
             results.append(
@@ -1247,6 +1281,7 @@ class DatabaseService:
                     small_skid=small_skid,
                     large_skid=large_skid,
                     pickup=pickup,
+                    pickup_vehicle=pickup_vehicle,
                     requires_empty_truck=requires_empty_truck,
                     box=box,
                     lat=float(lat or 0.0),

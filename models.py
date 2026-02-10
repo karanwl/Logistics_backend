@@ -30,6 +30,7 @@ class DeliveryJob(BaseModel):
     small_skid: int = 0
     large_skid: int = 0
     pickup: bool = False
+    pickup_vehicle: str = ""
     requires_empty_truck: bool = False
 
     lat: float = 0.0
@@ -42,15 +43,22 @@ class DeliveryJob(BaseModel):
 
     @property
     def requires_truck(self) -> bool:
-        return (
+        cargo_requires_truck = (
             (self.door or 0) > 0
             or (self.frame or 0) > 0
             or (self.exp_frame or 0) > 0
             or (self.med_skid or 0) > 0
             or (self.small_skid or 0) > 0
             or (self.large_skid or 0) > 0
-            or bool(self.pickup)
         )
+        pickup_vehicle = str(getattr(self, "pickup_vehicle", "") or "").strip().lower()
+        pickup_requires_truck = False
+        if bool(self.pickup):
+            if bool(getattr(self, "requires_empty_truck", False)):
+                pickup_requires_truck = True
+            elif pickup_vehicle == "truck":
+                pickup_requires_truck = True
+        return cargo_requires_truck or pickup_requires_truck
 
     model_config = ConfigDict(coerce_numbers_to_str=True, extra="ignore")
 

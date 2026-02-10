@@ -298,6 +298,13 @@ def _normalize_delivery_for_ui(d) -> Dict[str, Any]:
         + ((frame_qty + exp_frame_qty) * _frame_units())
     )
 
+    pickup_flag = bool(getattr(d, "pickup", False))
+    pickup_vehicle = str(getattr(d, "pickup_vehicle", "") or "").strip().lower()
+    if pickup_flag and not pickup_vehicle:
+        pickup_vehicle = "both"
+    if not pickup_flag:
+        pickup_vehicle = ""
+
     return {
         "id": str(d.id),
         "job_name": getattr(d, "job_name", ""),
@@ -315,7 +322,8 @@ def _normalize_delivery_for_ui(d) -> Dict[str, Any]:
         "large_skid": large_qty,
         "box": int(getattr(d, "box", 0) or 0),
         "requires_truck": bool(getattr(d, "requires_truck", False)),
-        "pickup": bool(getattr(d, "pickup", False)),
+        "pickup": pickup_flag,
+        "pickup_vehicle": pickup_vehicle,
         "requires_empty_truck": bool(getattr(d, "requires_empty_truck", False)),
         "window_start": getattr(d, "window_start", None),
         "window_end": getattr(d, "window_end", None),

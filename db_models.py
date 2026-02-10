@@ -30,6 +30,7 @@ class Delivery(Base):
     small_skid = Column("Small Skid", Integer)
     large_skid = Column("Large Skid", Integer)
     pickup = Column("Pickup", Boolean)
+    pickup_vehicle = Column("Pickup Vehicle", Text)
     requires_empty_truck = Column("Requires Empty Truck", Boolean)
     door = Column("Door", Integer)
     frame = Column("Frame", Integer)

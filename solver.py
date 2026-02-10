@@ -120,6 +120,11 @@ class RouteOptimizer:
     def _node_requires_truck(self, node: int) -> bool:
         if node in self.reload_nodes:
             return True
+        van_only, truck_only = self._node_pickup_vehicle_flags(node)
+        if truck_only:
+            return True
+        if van_only and not truck_only:
+            return False
         door_total, frame_total, exp_frame_total, skid_present = self._node_cargo_summary(node)
         if self._node_requires_empty_pickup(node):
             return True
@@ -234,6 +239,21 @@ class RouteOptimizer:
             return d.get(field_name, default)
         return getattr(d, field_name, default)
 
+    def _normalize_pickup_vehicle(self, value) -> str:
+        raw = str(value or "").strip().lower()
+        if not raw:
+            return "both"
+        if raw in ("van", "vans", "van-only", "van only", "van_only"):
+            return "van"
+        if raw in ("truck", "trucks", "truck-only", "truck only", "truck_only"):
+            return "truck"
+        if raw in ("both", "any", "either", "all", "van/truck", "truck/van"):
+            return "both"
+        return "both"
+
+    def _delivery_pickup_vehicle(self, d) -> str:
+        return self._normalize_pickup_vehicle(self._delivery_field(d, "pickup_vehicle", ""))
+
     def _delivery_units(self, d) -> int:
         """Fallback when token doesn't encode units explicitly."""
         med_qty = int(self._delivery_field(d, "med_skid", self._delivery_field(d, "skid", 0)) or 0)
@@ -338,6 +358,30 @@ class RouteOptimizer:
 
         return parsed if found else None
 
+    def _node_pickup_vehicle_flags(self, node_idx: int) -> tuple[bool, bool]:
+        van_only = False
+        truck_only = False
+        tokens = self.node_to_jobs.get(node_idx, [])
+        for tok in tokens:
+            base_id, _, _ = self._parse_token(tok)
+            if not base_id:
+                continue
+            d = self.delivery_by_id.get(base_id)
+            if not d:
+                continue
+            if not bool(self._delivery_field(d, "pickup", False)):
+                continue
+            if bool(self._delivery_field(d, "requires_empty_truck", False)):
+                truck_only = True
+            pickup_vehicle = self._delivery_pickup_vehicle(d)
+            if pickup_vehicle == "van":
+                van_only = True
+            elif pickup_vehicle == "truck":
+                truck_only = True
+            if van_only and truck_only:
+                break
+        return van_only, truck_only
+
     def _node_cargo_summary(self, node_idx: int) -> tuple[int, int, int, bool]:
         """
         Sum door/frame/exp_frame counts (plus skid presence) for all deliveries at this node.
@@ -416,7 +460,8 @@ class RouteOptimizer:
                 continue
             pickup = bool(self._delivery_field(d, "pickup", False))
             requires_empty = bool(self._delivery_field(d, "requires_empty_truck", False))
-            if pickup and requires_empty:
+            pickup_vehicle = self._delivery_pickup_vehicle(d)
+            if pickup and requires_empty and pickup_vehicle != "van":
                 return True
         return False
 
@@ -462,12 +507,17 @@ class RouteOptimizer:
 
         node_has_skid = [False] * len(self.distance_matrix)
         node_has_doorframe = [False] * len(self.distance_matrix)
+        node_pickup_van_only = [False] * len(self.distance_matrix)
+        node_pickup_truck_only = [False] * len(self.distance_matrix)
         for node in range(1, len(self.distance_matrix)):
             if node in self.reload_nodes:
                 continue
             door_total, frame_total, exp_frame_total, skid_present = self._node_cargo_summary(node)
             node_has_skid[node] = bool(skid_present)
             node_has_doorframe[node] = (door_total + frame_total + exp_frame_total) > 0
+            van_only, truck_only = self._node_pickup_vehicle_flags(node)
+            node_pickup_van_only[node] = bool(van_only and not truck_only)
+            node_pickup_truck_only[node] = bool(truck_only)
 
         # ---------------------------
         # Callbacks for constraints
@@ -535,6 +585,25 @@ class RouteOptimizer:
         for _ in vehicle_types:
             cb_idx = routing.RegisterTransitCallback(make_vehicle_unit_cb())
             unit_cbs.append(cb_idx)
+
+        van_vehicle_ids = [int(idx) for idx, v_type in enumerate(vehicle_types) if v_type == "van"]
+        truck_vehicle_ids = [int(idx) for idx, v_type in enumerate(vehicle_types) if v_type == "truck"]
+        for node in range(1, len(self.distance_matrix)):
+            if node in self.reload_nodes:
+                continue
+            allowed = None
+            if node_pickup_van_only[node]:
+                allowed = van_vehicle_ids
+            elif node_pickup_truck_only[node]:
+                allowed = truck_vehicle_ids
+            if allowed is None:
+                continue
+            idx = int(manager.NodeToIndex(node))
+            if allowed:
+                try:
+                    routing.SetAllowedVehiclesForIndex(list(map(int, allowed)), idx)
+                except TypeError:
+                    routing.VehicleVar(idx).SetValues(list(map(int, allowed)))
 
         skid_presence_idx = routing.RegisterTransitCallback(skid_presence_cb)
         doorframe_presence_idx = routing.RegisterTransitCallback(doorframe_presence_cb)
@@ -645,7 +714,6 @@ class RouteOptimizer:
             if self._node_requires_empty_pickup(node)
         ]
         if pickup_empty_nodes:
-            truck_vehicle_ids = [int(idx) for idx, v_type in enumerate(vehicle_types) if v_type == "truck"]
             for node in pickup_empty_nodes:
                 idx = int(manager.NodeToIndex(node))
                 if truck_vehicle_ids:

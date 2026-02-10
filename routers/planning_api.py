@@ -140,6 +140,7 @@ class BulkDeliveryItem(BaseModel):
     box: int = Field(default=0, ge=0)
     exp_frame: int = Field(default=0, ge=0)
     pickup: bool = False
+    pickup_vehicle: str | None = None
     requires_empty_truck: bool = False
 
     @field_validator("scheduled_date")
@@ -161,6 +162,7 @@ class BulkCargoUpdateRequest(BaseModel):
     exp_frame: int | None = Field(default=None, ge=0)
     box: int | None = Field(default=None, ge=0)
     pickup: bool | None = None
+    pickup_vehicle: str | None = None
     requires_empty_truck: bool | None = None
 
 
@@ -177,6 +179,7 @@ class BulkUpdateDeliveryItem(BaseModel):
     window_start: str | None = None
     window_end: str | None = None
     pickup: bool | None = None
+    pickup_vehicle: str | None = None
     requires_empty_truck: bool | None = None
 
 
@@ -300,6 +303,14 @@ def _normalize_plan_delivery(item: Any) -> Dict[str, Any]:
         d["pickup"] = bool(d.get("pickup"))
     if "requires_empty_truck" in d:
         d["requires_empty_truck"] = bool(d.get("requires_empty_truck"))
+    if "pickup_vehicle" in d or "pickup" in d:
+        pickup_flag = bool(d.get("pickup"))
+        pickup_vehicle = DatabaseService._normalize_pickup_vehicle(d.get("pickup_vehicle"))
+        if pickup_flag and not pickup_vehicle:
+            pickup_vehicle = "both"
+        if not pickup_flag:
+            pickup_vehicle = ""
+        d["pickup_vehicle"] = pickup_vehicle
 
     if "requires_truck" not in d:
         d["requires_truck"] = any(
@@ -532,6 +543,7 @@ class DeliveryUpdateRequest(BaseModel):
     door: int | None = 0
     box: int | None = 0
     pickup: bool | None = False
+    pickup_vehicle: str | None = None
     requires_empty_truck: bool | None = False
     window_start: str | None = None
     window_end: str | None = None
@@ -564,6 +576,9 @@ def delivery_update(delivery_id: str, payload: DeliveryUpdateRequest, request: R
         "Pickup": bool(payload.pickup),
         "Requires Empty Truck": bool(payload.requires_empty_truck),
     }
+    if payload.pickup_vehicle is not None:
+        pickup_vehicle = DatabaseService._normalize_pickup_vehicle(payload.pickup_vehicle)
+        fields[settings.DELIVERIES_PICKUP_VEHICLE_FIELD] = pickup_vehicle or None
     if payload.sales_order is not None:
         sales_order_value = parse_sales_order(payload.sales_order)
         fields[settings.DELIVERIES_SALES_ORDER_FIELD] = sales_order_value
@@ -858,6 +873,12 @@ def deliveries_bulk_create(payload: BulkCreateDeliveriesRequest, request: Reques
             results.append({"ok": False, "index": idx, "error": " ".join(errors)})
             continue
 
+        pickup_vehicle = DatabaseService._normalize_pickup_vehicle(item.pickup_vehicle)
+        if bool(item.pickup) and not pickup_vehicle:
+            pickup_vehicle = "both"
+        if not bool(item.pickup):
+            pickup_vehicle = ""
+
         fields = {
             settings.DELIVERIES_JOB_LINK_FIELD: [jobsite_id],
             "Scheduled Date": scheduled_date,
@@ -869,6 +890,7 @@ def deliveries_bulk_create(payload: BulkCreateDeliveriesRequest, request: Reques
             "Door": int(item.door or 0),
             "Box": int(item.box or 0),
             "Pickup": bool(item.pickup),
+            settings.DELIVERIES_PICKUP_VEHICLE_FIELD: pickup_vehicle or None,
             "Requires Empty Truck": bool(item.requires_empty_truck),
         }
         sales_order_value = parse_sales_order(sales_order)
