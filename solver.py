@@ -130,6 +130,9 @@ class RouteOptimizer:
         capacity = int(self.truck_capacity_units or 0)
         if capacity <= 0:
             return 0
+        truck_count = sum(1 for v in self.vehicle_types if v == "truck")
+        if truck_count <= 0:
+            return 0
 
         total_units = 0
         for node in range(1, len(self.distance_matrix)):
@@ -149,9 +152,12 @@ class RouteOptimizer:
                         unit_val = 0
                     total_units += max(0, int(unit_val))
 
-        if total_units <= capacity:
+        # A truck can carry one full load before any synthetic depot-reload stop is needed.
+        base_capacity = capacity * truck_count
+        if total_units <= base_capacity:
             return 0
-        return max(0, int(math.ceil(total_units / capacity) - 1))
+        required_loads = int(math.ceil(total_units / capacity))
+        return max(0, required_loads - truck_count)
 
     def _append_depot_clone(self, matrix: list[list[int]]):
         depot_row = list(matrix[self.depot])
@@ -573,8 +579,6 @@ class RouteOptimizer:
         ]
         if pickup_empty_nodes:
             truck_vehicle_ids = [int(idx) for idx, v_type in enumerate(vehicle_types) if v_type == "truck"]
-            solver = routing.solver()
-            ends = [routing.End(v_id) for v_id in range(len(vehicle_types))]
             for node in pickup_empty_nodes:
                 idx = int(manager.NodeToIndex(node))
                 if truck_vehicle_ids:
@@ -584,9 +588,8 @@ class RouteOptimizer:
                         routing.SetAllowedVehiclesForIndex(list(map(int, truck_vehicle_ids)), idx)
                     except TypeError:
                         routing.VehicleVar(idx).SetValues(list(map(int, truck_vehicle_ids)))
+                # Must arrive empty; do not force route end so the same truck can continue if feasible.
                 skid_dim.CumulVar(idx).SetValue(0)
-                end_for_vehicle = solver.Element(ends, routing.VehicleVar(idx))
-                solver.Add(routing.NextVar(idx) == end_for_vehicle)
 
         # ---------------------------
         # Downtown-first (hard + soft)
