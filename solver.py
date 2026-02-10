@@ -168,7 +168,7 @@ class RouteOptimizer:
             new_idx = len(self.distance_matrix)
             self._append_depot_clone(self.distance_matrix)
             self._append_depot_clone(self.duration_matrix)
-            self.node_to_jobs[new_idx] = ["DepotReload"]
+            self.node_to_jobs[new_idx] = ["Depot - Reload"]
             self.node_is_downtown[new_idx] = False
             self.reload_nodes.append(new_idx)
 
