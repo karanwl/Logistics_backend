@@ -44,6 +44,7 @@ class Settings(BaseModel):
 
     PHYSICAL_TRUCKS: int = _env_int("PHYSICAL_TRUCKS", "2")
     VEHICLE_CAPACITY_UNITS: int = _env_int("VEHICLE_CAPACITY_UNITS", "140")
+    VAN_CAPACITY_UNITS: int = _env_int("VAN_CAPACITY_UNITS", "25")
     # "Med Skid" replaces legacy "Skid" (aka long skid). Keep LONG_SKID_UNITS as fallback.
     MED_SKID_UNITS: int = _env_int("MED_SKID_UNITS", os.getenv("LONG_SKID_UNITS", "20"))
     LONG_SKID_UNITS: int = _env_int("LONG_SKID_UNITS", "20")
