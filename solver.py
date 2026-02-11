@@ -582,7 +582,7 @@ class RouteOptimizer:
             if node_idx == self.depot:
                 return 0
             if node_idx in self.reload_nodes:
-                return int(self.truck_capacity_units)
+                return 0
 
             tokens = self.node_to_jobs.get(node_idx, [])
             total_units = 0
@@ -639,6 +639,12 @@ class RouteOptimizer:
         truck_vehicle_ids = [int(idx) for idx, v_type in enumerate(vehicle_types) if v_type == "truck"]
         for node in range(1, len(self.distance_matrix)):
             if node in self.reload_nodes:
+                if truck_vehicle_ids:
+                    idx = int(manager.NodeToIndex(node))
+                    try:
+                        routing.SetAllowedVehiclesForIndex(list(map(int, truck_vehicle_ids)), idx)
+                    except TypeError:
+                        routing.VehicleVar(idx).SetValues(list(map(int, truck_vehicle_ids)))
                 continue
             allowed = None
             if node_pickup_van_only[node]:
@@ -743,7 +749,8 @@ class RouteOptimizer:
             self.truck_capacity_units if v == "truck" else int(self.van_capacity_units or 0)
             for v in vehicle_types
         ]
-        routing.AddDimensionWithVehicleTransitAndCapacity(unit_cbs, 0, unit_caps, False, "Skids")
+        slack_cap = max(int(self.truck_capacity_units or 0), int(self.van_capacity_units or 0))
+        routing.AddDimensionWithVehicleTransitAndCapacity(unit_cbs, slack_cap, unit_caps, True, "Skids")
         skid_dim = routing.GetDimensionOrDie("Skids")
         solver = routing.solver()
         skid_presence_dim = routing.GetDimensionOrDie("SkidPresence")
@@ -756,20 +763,25 @@ class RouteOptimizer:
             door_zero = solver.IsEqualCstVar(doorframe_presence_dim.CumulVar(end_idx), 0)
             solver.Add(skid_zero + door_zero >= 1)
 
+        # Partial reloads via slack: allow loading only at depot starts and reload nodes.
+        for idx in range(routing.Size()):
+            skid_dim.SlackVar(idx).SetRange(0, 0)
+        for v_id, v_type in enumerate(vehicle_types):
+            start_idx = routing.Start(v_id)
+            cap = self.truck_capacity_units if v_type == "truck" else int(self.van_capacity_units or 0)
+            skid_dim.SlackVar(start_idx).SetRange(0, int(cap))
+        if self.reload_nodes:
+            for node in self.reload_nodes:
+                idx = int(manager.NodeToIndex(node))
+                skid_dim.SlackVar(idx).SetRange(0, int(self.truck_capacity_units))
+
         pickup_empty_nodes = [
             node
             for node in range(1, len(self.distance_matrix))
             if self._node_requires_empty_pickup(node)
         ]
-        if self.reload_nodes:
-            for node in self.reload_nodes:
-                idx = int(manager.NodeToIndex(node))
-                # Force truck to arrive empty before a reload.
-                skid_dim.CumulVar(idx).SetValue(0)
-            self._print_search(
-                f"[solver] reload nodes require empty arrival count={len(self.reload_nodes)}"
-            )
         if pickup_empty_nodes:
+            ends = [routing.End(v_id) for v_id in range(len(vehicle_types))]
             for node in pickup_empty_nodes:
                 idx = int(manager.NodeToIndex(node))
                 if truck_vehicle_ids:
@@ -779,8 +791,9 @@ class RouteOptimizer:
                         routing.SetAllowedVehiclesForIndex(list(map(int, truck_vehicle_ids)), idx)
                     except TypeError:
                         routing.VehicleVar(idx).SetValues(list(map(int, truck_vehicle_ids)))
-                # Must arrive empty; do not force route end so the same truck can continue if feasible.
-                skid_dim.CumulVar(idx).SetValue(0)
+                # Must return to depot immediately after.
+                end_for_vehicle = solver.Element(ends, routing.VehicleVar(idx))
+                solver.Add(routing.NextVar(idx) == end_for_vehicle)
 
         if self.reload_nodes:
             # Reload nodes are only meaningful when followed by additional work.
