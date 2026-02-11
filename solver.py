@@ -766,6 +766,9 @@ class RouteOptimizer:
                 idx = int(manager.NodeToIndex(node))
                 # Force truck to arrive empty before a reload.
                 skid_dim.CumulVar(idx).SetValue(0)
+            self._print_search(
+                f"[solver] reload nodes require empty arrival count={len(self.reload_nodes)}"
+            )
         if pickup_empty_nodes:
             for node in pickup_empty_nodes:
                 idx = int(manager.NodeToIndex(node))
@@ -998,6 +1001,8 @@ class RouteOptimizer:
                 if node != self.depot:
                     visited_nodes.add(int(node))
 
+                load_before = int(solution.Value(skid_dim.CumulVar(index)))
+                load_after = int(solution.Value(skid_dim.CumulVar(next_index)))
                 arr = solution.Value(time_dim.CumulVar(index))
                 dep = arr + svc_for(v_type, node)
                 stop_units, stop_units_signed = stop_unit_summary(node)
@@ -1013,6 +1018,17 @@ class RouteOptimizer:
                     "stop_units_signed": int(stop_units_signed),
                 })
 
+                is_reload = node in self.reload_nodes
+                self._print_search(
+                    "[solver][load] "
+                    f"v_id={v_id} v_type={v_type} "
+                    f"node={node} reload={is_reload} "
+                    f"load_before={load_before} "
+                    f"demand={int(stop_units_signed)} "
+                    f"load_after={load_after} "
+                    f"jobs={self.node_to_jobs.get(node, ['Depot'])}"
+                )
+
                 total_distance += int(self.distance_matrix[node][next_node])
                 index = next_index
 
@@ -1020,6 +1036,7 @@ class RouteOptimizer:
             plan.append(["Depot"])
 
             end_arr = solution.Value(time_dim.CumulVar(index))
+            end_load = int(solution.Value(skid_dim.CumulVar(index)))
             stops.append({
                 "node": end_node,
                 "jobs": ["Depot"],
@@ -1030,6 +1047,12 @@ class RouteOptimizer:
                 "stop_units": 0,
                 "stop_units_signed": 0,
             })
+            self._print_search(
+                "[solver][load] "
+                f"v_id={v_id} v_type={v_type} "
+                f"node={end_node} reload=False "
+                f"load_before={end_load} demand=0 load_after={end_load} jobs=['Depot']"
+            )
 
             if len(plan) > 2:
                 used_units = int(solution.Value(skid_dim.CumulVar(index)))
