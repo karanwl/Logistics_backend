@@ -183,11 +183,30 @@ class RouteOptimizer:
         # A truck can carry one full load before any synthetic depot-reload stop is needed.
         # Reloads are based on a separate threshold to allow extra trips before
         # adding additional trucks.
-        base_capacity = reload_threshold * truck_count
-        if total_units <= base_capacity:
+        if total_units <= reload_threshold:
             return 0
         required_loads = int(math.ceil(total_units / reload_threshold))
-        return max(0, required_loads - truck_count)
+        return max(0, required_loads - 1)
+
+    def _total_truck_only_units(self) -> int:
+        total_units = 0
+        for node in range(1, self.base_node_count):
+            if self._node_requires_truck(node):
+                tokens = self.node_to_jobs.get(node, [])
+                for t in tokens:
+                    deliv_id, _, units = self._parse_token(t)
+                    d = self.delivery_by_id.get(deliv_id) if deliv_id else None
+                    pickup_flag = bool(self._delivery_field(d, "pickup", False)) if d else False
+                    if pickup_flag:
+                        continue
+                    if units:
+                        unit_val = int(units)
+                    elif d:
+                        unit_val = self._delivery_units(d)
+                    else:
+                        unit_val = 0
+                    total_units += max(0, int(unit_val))
+        return int(total_units)
 
     def _append_depot_clone(self, matrix: list[list[int]]):
         depot_row = list(matrix[self.depot])
@@ -825,6 +844,17 @@ class RouteOptimizer:
     def solve(self, service_time=1200, max_route_time=43200):
         self._print_search("[solver] single-model solve started")
         total_trucks = sum(1 for v in self.vehicle_types if v == "truck")
+        total_units = self._total_truck_only_units()
+        prefer_reload = total_units > int(self.reload_threshold_units or 0)
+        preferred_physical_truck_count = min(self.physical_truck_count, 1) if prefer_reload else self.physical_truck_count
+        self._print_search(
+            "[solver] reload check "
+            f"truck_only_units={total_units} "
+            f"reload_threshold={int(self.reload_threshold_units or 0)} "
+            f"prefer_reload={prefer_reload} "
+            f"physical_trucks={self.physical_truck_count} "
+            f"physical_trucks_used={preferred_physical_truck_count}"
+        )
         if total_trucks > 1:
             # Ensure the 1-truck attempt has enough synthetic reload nodes available.
             self._ensure_reload_nodes_for_truck_count(1)
@@ -834,7 +864,7 @@ class RouteOptimizer:
                 service_time=service_time,
                 max_route_time=max_route_time,
                 vehicle_types=reduced_types,
-                physical_truck_count=min(self.physical_truck_count, 1),
+                physical_truck_count=preferred_physical_truck_count,
             )
             if output:
                 dropped_count = int(output[0].get("dropped_count", 0) or 0)
@@ -855,7 +885,11 @@ class RouteOptimizer:
                     )
                     return output
 
-        output = self._solve_model(service_time=service_time, max_route_time=max_route_time)
+        output = self._solve_model(
+            service_time=service_time,
+            max_route_time=max_route_time,
+            physical_truck_count=preferred_physical_truck_count,
+        )
         if not output:
             self._print_search("[solver] no solution")
             return None
