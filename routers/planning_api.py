@@ -380,9 +380,7 @@ def plan_publish(payload: PublishPlanRequest, request: Request):
 
 @router.get("/jobsites/list")
 def jobsites_list(request: Request):
-    user = get_current_user(request)
-    if not user or user.get("role") not in ("manager", "admin"):
-        raise HTTPException(status_code=403, detail="Manager/Admin access required.")
+    _require_manager_admin(request)
     svc = DatabaseService()
     jobsites = svc.list_jobsites_min(force_refresh=_wants_refresh(request))
     resp = ok_response(request, {"jobsites": jobsites})
@@ -396,9 +394,7 @@ def jobsites_create_json(
     name: str = Form(...),
     address: str = Form(...),
 ):
-    user = get_current_user(request)
-    if not user or user.get("role") not in ("manager", "admin"):
-        raise HTTPException(status_code=403, detail="Manager/Admin access required.")
+    _require_manager_admin(request)
     name_clean = (name or "").strip()
     address_clean = (address or "").strip()
     if not name_clean or not address_clean:
@@ -411,6 +407,65 @@ def jobsites_create_json(
     }
     created = svc.create_record("Jobsites", fields)
     resp = ok_response(request, {"ok": True, "jobsite": created})
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+class JobsiteUpdateRequest(BaseModel):
+    name: str | None = None
+    address: str | None = None
+    site_contact: str | None = None
+    site_contact_number: str | None = None
+    latitude: float | None = None
+    longitude: float | None = None
+
+
+@router.patch("/jobsites/{jobsite_id}")
+def jobsites_update(jobsite_id: str, payload: JobsiteUpdateRequest, request: Request):
+    _require_manager_admin(request)
+    svc = DatabaseService()
+    try:
+        svc.get_record("Jobsites", jobsite_id)
+    except Exception:
+        raise HTTPException(status_code=404, detail="Jobsite not found.")
+    fields: Dict[str, Any] = {}
+    if payload.name is not None:
+        name = payload.name.strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="Jobsite name cannot be empty.")
+        fields[settings.JOBSITES_NAME_FIELD] = name
+    if payload.address is not None:
+        addr = payload.address.strip()
+        if not addr:
+            raise HTTPException(status_code=400, detail="Jobsite address cannot be empty.")
+        fields[settings.JOBSITES_ADDRESS_FIELD] = addr
+    if payload.site_contact is not None:
+        contact = payload.site_contact.strip()
+        fields["Site Contact"] = contact if contact else None
+    if payload.site_contact_number is not None:
+        contact_num = payload.site_contact_number.strip()
+        fields["Site Contact Number"] = contact_num if contact_num else None
+    if payload.latitude is not None:
+        fields[settings.JOBSITES_LAT_FIELD] = float(payload.latitude)
+    if payload.longitude is not None:
+        fields[settings.JOBSITES_LON_FIELD] = float(payload.longitude)
+    if not fields:
+        raise HTTPException(status_code=400, detail="No updates provided.")
+    updated = svc.update_record("Jobsites", jobsite_id, fields)
+    resp = ok_response(request, {"ok": True, "jobsite": updated})
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@router.delete("/jobsites/{jobsite_id}")
+def jobsites_delete(jobsite_id: str, request: Request):
+    _require_manager_admin(request)
+    svc = DatabaseService()
+    try:
+        deleted = svc.delete_record("Jobsites", jobsite_id)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    resp = ok_response(request, {"ok": True, "deleted": deleted})
     resp.headers["Cache-Control"] = "no-store"
     return resp
 

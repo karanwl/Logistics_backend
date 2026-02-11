@@ -936,7 +936,10 @@ class DatabaseService:
                     "id": rec.get("id", ""),
                     "name": self._first_str(f.get(settings.JOBSITES_NAME_FIELD)),
                     "address": self._first_str(f.get(settings.JOBSITES_ADDRESS_FIELD)),
-
+                    "site_contact": self._first_str(f.get("Site Contact")),
+                    "site_contact_number": self._first_str(f.get("Site Contact Number")),
+                    "latitude": self._coerce_float(f.get(settings.JOBSITES_LAT_FIELD)),
+                    "longitude": self._coerce_float(f.get(settings.JOBSITES_LON_FIELD)),
                 }
             )
         out.sort(key=lambda x: (x["name"] or "").lower())
