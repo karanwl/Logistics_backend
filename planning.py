@@ -566,7 +566,6 @@ def generate_tomorrow_plan(
         "van_fixed_cost": settings.SOLVER_VAN_FIXED_COST,
         "truck_fixed_cost_physical": settings.SOLVER_TRUCK_FIXED_COST_PHYSICAL,
         "truck_fixed_cost_overflow": settings.SOLVER_TRUCK_FIXED_COST_OVERFLOW,
-        "truck_fixed_cost_trip": settings.SOLVER_TRUCK_FIXED_COST_TRIP,
         "drop_node_penalty": settings.SOLVER_DROP_NODE_PENALTY,
         "shift_seconds": settings.SOLVER_SHIFT_SECONDS,
         "waiting_slack_seconds": settings.SOLVER_WAITING_SLACK_SECONDS,
