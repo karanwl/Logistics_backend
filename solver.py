@@ -749,7 +749,16 @@ class RouteOptimizer:
             self.truck_capacity_units if v == "truck" else int(self.van_capacity_units or 0)
             for v in vehicle_types
         ]
-        slack_cap = max(int(self.truck_capacity_units or 0), int(self.van_capacity_units or 0))
+        max_node_units = 0
+        for node in range(1, len(self.distance_matrix)):
+            if node in self.reload_nodes:
+                continue
+            max_node_units = max(max_node_units, abs(int(self._node_capacity_units(node) or 0)))
+        slack_cap = max(
+            int(self.truck_capacity_units or 0),
+            int(self.van_capacity_units or 0),
+            int(max_node_units),
+        )
         routing.AddDimensionWithVehicleTransitAndCapacity(unit_cbs, slack_cap, unit_caps, True, "Skids")
         skid_dim = routing.GetDimensionOrDie("Skids")
         solver = routing.solver()
@@ -765,7 +774,7 @@ class RouteOptimizer:
 
         # Partial reloads via slack: allow loading only at depot starts and reload nodes.
         for idx in range(routing.Size()):
-            skid_dim.SlackVar(idx).SetRange(0, 0)
+            skid_dim.SlackVar(idx).SetRange(0, int(slack_cap))
         for v_id, v_type in enumerate(vehicle_types):
             start_idx = routing.Start(v_id)
             cap = self.truck_capacity_units if v_type == "truck" else int(self.van_capacity_units or 0)
@@ -774,6 +783,13 @@ class RouteOptimizer:
             for node in self.reload_nodes:
                 idx = int(manager.NodeToIndex(node))
                 skid_dim.SlackVar(idx).SetRange(0, int(self.truck_capacity_units))
+        for node in range(1, len(self.distance_matrix)):
+            if node in self.reload_nodes:
+                continue
+            idx = int(manager.NodeToIndex(node))
+            slack = skid_dim.SlackVar(idx)
+            active = routing.ActiveVar(idx)
+            solver.Add(slack <= int(slack_cap) * (1 - active))
 
         pickup_empty_nodes = [
             node
