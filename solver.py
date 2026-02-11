@@ -45,7 +45,7 @@ class RouteOptimizer:
         "truck_fixed_cost_physical": 500,
         "truck_fixed_cost_overflow": 50000,
         "drop_node_penalty": 100000,
-        "shift_seconds": 7.7 * 3600,
+        "shift_seconds": 8 * 3600,
         "waiting_slack_seconds": 600,
         "search_time_limit_s": 30,
         "search_print_results": True,
