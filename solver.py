@@ -32,6 +32,7 @@ class RouteOptimizer:
     VAN_FRAME_LIMIT = 3
     VAN_DOOR_LIMIT = 3
     VAN_EXP_FRAME_LIMIT = 10
+    RELOAD_THRESHOLD_UNITS = 160
 
     DEFAULT_PENALTIES = {
         "truck_cost_factor": 1.12,
@@ -101,6 +102,10 @@ class RouteOptimizer:
             1,
             int(getattr(settings, "VEHICLE_CAPACITY_UNITS", self.TRUCK_CAPACITY_UNITS)),
         )
+        self.reload_threshold_units = max(
+            1,
+            int(getattr(settings, "SOLVER_RELOAD_THRESHOLD_UNITS", self.RELOAD_THRESHOLD_UNITS)),
+        )
         self.van_capacity_units = max(
             0,
             int(getattr(settings, "VAN_CAPACITY_UNITS", self.VAN_CAPACITY_UNITS)),
@@ -148,7 +153,8 @@ class RouteOptimizer:
 
     def _estimate_reload_count(self, truck_count: int | None = None) -> int:
         capacity = int(self.truck_capacity_units or 0)
-        if capacity <= 0:
+        reload_threshold = int(self.reload_threshold_units or 0)
+        if capacity <= 0 or reload_threshold <= 0:
             return 0
         if truck_count is None:
             truck_count = sum(1 for v in self.vehicle_types if v == "truck")
@@ -175,10 +181,12 @@ class RouteOptimizer:
                     total_units += max(0, int(unit_val))
 
         # A truck can carry one full load before any synthetic depot-reload stop is needed.
-        base_capacity = capacity * truck_count
+        # Reloads are based on a separate threshold to allow extra trips before
+        # adding additional trucks.
+        base_capacity = reload_threshold * truck_count
         if total_units <= base_capacity:
             return 0
-        required_loads = int(math.ceil(total_units / capacity))
+        required_loads = int(math.ceil(total_units / reload_threshold))
         return max(0, required_loads - truck_count)
 
     def _append_depot_clone(self, matrix: list[list[int]]):
