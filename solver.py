@@ -45,6 +45,7 @@ class RouteOptimizer:
         "van_fixed_cost": 0,
         "truck_fixed_cost_physical": 15000,
         "truck_fixed_cost_overflow": 100000,
+        "truck_fixed_cost_trip": 0,
         "drop_node_penalty": 100000,
         "truck_service_time_s": 30 * 60,
         "van_service_time_s": 10 * 60,
@@ -113,6 +114,7 @@ class RouteOptimizer:
             0,
             int(getattr(settings, "VAN_CAPACITY_UNITS", self.VAN_CAPACITY_UNITS)),
         )
+        self.reload_mode = str(getattr(settings, "SOLVER_RELOAD_MODE", "multi_trip")).strip().lower()
 
         self._auto_add_reload_nodes()
 
@@ -128,6 +130,7 @@ class RouteOptimizer:
             "van_fixed_cost": int(self.penalties["van_fixed_cost"]),
             "truck_fixed_cost_physical": int(self.penalties["truck_fixed_cost_physical"]),
             "truck_fixed_cost_overflow": int(self.penalties["truck_fixed_cost_overflow"]),
+            "truck_fixed_cost_trip": int(self.penalties.get("truck_fixed_cost_trip", 0)),
             "drop_node_penalty": int(self.penalties["drop_node_penalty"]),
             "truck_service_time_s": int(self.penalties.get("truck_service_time_s", 30 * 60)),
             "van_service_time_s": int(self.penalties.get("van_service_time_s", 10 * 60)),
@@ -210,6 +213,18 @@ class RouteOptimizer:
         required_loads = int(math.ceil(total_units / reload_threshold))
         return max(0, required_loads - 1)
 
+    def _required_truck_trip_count(self, base_truck_count: int) -> int:
+        if base_truck_count <= 0:
+            return 0
+        reload_threshold = int(self.reload_threshold_units or 0)
+        if reload_threshold <= 0:
+            return base_truck_count
+        total_units = self._total_truck_only_units()
+        if total_units <= 0:
+            return base_truck_count
+        required_loads = int(math.ceil(total_units / reload_threshold))
+        return max(base_truck_count, required_loads)
+
     def _total_truck_only_units(self) -> int:
         total_units = 0
         for node in range(1, self.base_node_count):
@@ -237,6 +252,8 @@ class RouteOptimizer:
         matrix.append(depot_row + [depot_row[self.depot]])
 
     def _auto_add_reload_nodes(self):
+        if self.reload_mode == "multi_trip":
+            return
         reload_count = self._estimate_reload_count()
         if reload_count <= 0:
             return
@@ -250,6 +267,8 @@ class RouteOptimizer:
             self.reload_nodes.append(new_idx)
 
     def _ensure_reload_nodes_for_truck_count(self, truck_count: int):
+        if self.reload_mode == "multi_trip":
+            return
         required = self._estimate_reload_count(truck_count=truck_count)
         missing = int(required - len(self.reload_nodes))
         if missing <= 0:
@@ -277,6 +296,11 @@ class RouteOptimizer:
             else:
                 subset.append(v_type)
         return subset
+
+    def _build_vehicle_trips(self, truck_trip_count: int, base_vehicle_types: list[str] | None = None) -> list[str]:
+        base = base_vehicle_types or self.vehicle_types
+        non_trucks = [v for v in base if v != "truck"]
+        return ["truck"] * max(0, int(truck_trip_count)) + non_trucks
 
     def _delivery_id(self, d) -> str:
         if isinstance(d, dict):
@@ -821,6 +845,7 @@ class RouteOptimizer:
         VAN_FIXED_COST = int(self.costs["van_fixed_cost"])
         TRUCK_FIXED_COST_PHYSICAL = int(self.costs["truck_fixed_cost_physical"])
         TRUCK_FIXED_COST_OVERFLOW = int(self.costs["truck_fixed_cost_overflow"])
+        TRUCK_FIXED_COST_TRIP = int(self.costs.get("truck_fixed_cost_trip", 0))
 
         truck_seen = 0
         for v_id, v_type in enumerate(vehicle_types):
@@ -828,7 +853,10 @@ class RouteOptimizer:
                 routing.SetFixedCostOfVehicle(VAN_FIXED_COST, v_id)
             else:
                 truck_seen += 1
-                cost = TRUCK_FIXED_COST_PHYSICAL if truck_seen <= physical_truck_count else TRUCK_FIXED_COST_OVERFLOW
+                if self.reload_mode == "multi_trip" and truck_seen > physical_truck_count:
+                    cost = TRUCK_FIXED_COST_TRIP
+                else:
+                    cost = TRUCK_FIXED_COST_PHYSICAL if truck_seen <= physical_truck_count else TRUCK_FIXED_COST_OVERFLOW
                 routing.SetFixedCostOfVehicle(cost, v_id)
 
         # ---------------------------
@@ -864,22 +892,36 @@ class RouteOptimizer:
     # ---------------------------
     def solve(self, service_time=1200, max_route_time=43200):
         self._print_search("[solver] single-model solve started")
-        total_trucks = sum(1 for v in self.vehicle_types if v == "truck")
+        base_truck_count = sum(1 for v in self.vehicle_types if v == "truck")
         total_units = self._total_truck_only_units()
         prefer_reload = total_units > int(self.reload_threshold_units or 0)
         preferred_physical_truck_count = min(self.physical_truck_count, 1) if prefer_reload else self.physical_truck_count
+        trip_truck_count = (
+            self._required_truck_trip_count(base_truck_count)
+            if self.reload_mode == "multi_trip"
+            else base_truck_count
+        )
         self._print_search(
             "[solver] reload check "
             f"truck_only_units={total_units} "
             f"reload_threshold={int(self.reload_threshold_units or 0)} "
             f"prefer_reload={prefer_reload} "
             f"physical_trucks={self.physical_truck_count} "
-            f"physical_trucks_used={preferred_physical_truck_count}"
+            f"physical_trucks_used={preferred_physical_truck_count} "
+            f"reload_mode={self.reload_mode} "
+            f"truck_trips={trip_truck_count}"
         )
-        if total_trucks > 1:
-            # Ensure the 1-truck attempt has enough synthetic reload nodes available.
-            self._ensure_reload_nodes_for_truck_count(1)
+        if base_truck_count > 1:
             reduced_types = self._build_vehicle_subset(1)
+            if self.reload_mode == "multi_trip":
+                reduced_trip_count = self._required_truck_trip_count(1)
+                reduced_types = self._build_vehicle_trips(
+                    reduced_trip_count,
+                    base_vehicle_types=reduced_types,
+                )
+            else:
+                # Ensure the 1-truck attempt has enough synthetic reload nodes available.
+                self._ensure_reload_nodes_for_truck_count(1)
             self._print_search("[solver] trying reduced fleet (1 truck + all vans)")
             output = self._solve_model(
                 service_time=service_time,
@@ -906,9 +948,13 @@ class RouteOptimizer:
                     )
                     return output
 
+        full_types = None
+        if self.reload_mode == "multi_trip":
+            full_types = self._build_vehicle_trips(trip_truck_count)
         output = self._solve_model(
             service_time=service_time,
             max_route_time=max_route_time,
+            vehicle_types=full_types,
             physical_truck_count=preferred_physical_truck_count,
         )
         if not output:
