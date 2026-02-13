@@ -59,23 +59,121 @@ class DatabaseService:
             raise RuntimeError("Missing DATABASE_URL env var.")
 
     _published_plan_type_supported: bool | None = None
+    _live_views_supported: bool | None = None
+    _normalized_schema_supported: bool | None = None
 
     @classmethod
     def _supports_published_plan_type(cls, bind=None) -> bool:
-        if cls._published_plan_type_supported is not None:
-            return cls._published_plan_type_supported
+        if cls._published_plan_type_supported is True:
+            return True
         try:
             inspector = inspect(bind or engine)
-            cols = inspector.get_columns("Published Plans")
-            col_names = {str(c.get("name", "")).strip() for c in cols}
-            cls._published_plan_type_supported = "Plan Type" in col_names
+            table_names = set(inspector.get_table_names())
+            if "published_plans" in table_names:
+                cols = inspector.get_columns("published_plans")
+                col_names = {str(c.get("name", "")).strip() for c in cols}
+                cls._published_plan_type_supported = "plan_type" in col_names
+            elif "Published Plans" in table_names:
+                cols = inspector.get_columns("Published Plans")
+                col_names = {str(c.get("name", "")).strip() for c in cols}
+                cls._published_plan_type_supported = "Plan Type" in col_names
+            else:
+                cls._published_plan_type_supported = False
         except Exception:
             cls._published_plan_type_supported = False
         return cls._published_plan_type_supported
 
+    @classmethod
+    def _supports_live_views(cls, bind=None) -> bool:
+        if cls._live_views_supported is True:
+            return True
+        try:
+            with (bind.connect() if bind is not None and hasattr(bind, "connect") else engine.connect()) as conn:
+                exists = conn.execute(
+                    text("SELECT to_regclass('public.v_route_live')")
+                ).scalar_one_or_none()
+            cls._live_views_supported = bool(exists)
+        except Exception:
+            cls._live_views_supported = False
+        return cls._live_views_supported
+
+    @classmethod
+    def _uses_normalized_schema(cls, bind=None) -> bool:
+        if cls._normalized_schema_supported is True:
+            return True
+        try:
+            inspector = inspect(bind or engine)
+            tables = {str(name) for name in inspector.get_table_names()}
+            cls._normalized_schema_supported = {"users", "jobsites", "deliveries"}.issubset(tables)
+        except Exception:
+            cls._normalized_schema_supported = False
+        return cls._normalized_schema_supported
+
+    @staticmethod
+    def _table_exists(table_name: str, bind=None) -> bool:
+        try:
+            inspector = inspect(bind or engine)
+            return str(table_name) in set(inspector.get_table_names())
+        except Exception:
+            return False
+
+    @staticmethod
+    def _format_time_value(value: Any) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        return text[:5] if len(text) >= 5 else text
+
+    @staticmethod
+    def _coerce_datetime(value: Any) -> datetime | None:
+        if value in (None, ""):
+            return None
+        if isinstance(value, datetime):
+            return value
+        try:
+            return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except Exception:
+            return None
+
+    @staticmethod
+    def _normalize_delivery_status(value: Any) -> str | None:
+        raw = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+        if not raw:
+            return None
+        allowed = {"pending", "assigned", "en_route", "arrived", "delivered", "failed", "cancelled"}
+        if raw == "in_progress":
+            return "en_route"
+        if raw == "canceled":
+            return "cancelled"
+        return raw if raw in allowed else None
+
     @staticmethod
     def _normalize_table_name(table_name: str) -> str:
         return (table_name or "").strip()
+
+    @classmethod
+    def _is_jobsites_table(cls, table_name: str) -> bool:
+        raw = cls._normalize_table_name(table_name).lower()
+        return raw in {"jobsites"}
+
+    @classmethod
+    def _is_deliveries_table(cls, table_name: str) -> bool:
+        raw = cls._normalize_table_name(table_name).lower()
+        return raw in {"deliveries"}
+
+    @classmethod
+    def _is_users_table(cls, table_name: str) -> bool:
+        raw = cls._normalize_table_name(table_name).lower()
+        settings_name = cls._normalize_table_name(settings.USERS_TABLE).lower()
+        return raw in {"users", settings_name}
+
+    @classmethod
+    def _is_published_plans_table(cls, table_name: str) -> bool:
+        raw = cls._normalize_table_name(table_name).lower()
+        settings_name = cls._normalize_table_name(settings.PUBLISHED_PLANS_TABLE).lower()
+        return raw in {"published_plans", "published plans", settings_name}
 
     @classmethod
     def _get_cached_table(cls, table_name: str) -> list[dict] | None:
@@ -217,6 +315,26 @@ class DatabaseService:
         scheduled = delivery.scheduled_date.isoformat() if delivery.scheduled_date else None
         job_id = delivery.job_id
         job_ids = [str(job_id)] if job_id is not None else []
+        status_updated_at = (
+            delivery.status_updated_at.isoformat()
+            if isinstance(delivery.status_updated_at, datetime)
+            else delivery.status_updated_at
+        )
+        arrived_at = (
+            delivery.arrived_at.isoformat()
+            if isinstance(delivery.arrived_at, datetime)
+            else delivery.arrived_at
+        )
+        delivered_at = (
+            delivery.delivered_at.isoformat()
+            if isinstance(delivery.delivered_at, datetime)
+            else delivery.delivered_at
+        )
+        updated_at = (
+            delivery.updated_at.isoformat()
+            if isinstance(getattr(delivery, "updated_at", None), datetime)
+            else getattr(delivery, "updated_at", None)
+        )
         fields = {
             "Delivery ID": delivery.delivery_id,
             settings.DELIVERIES_JOB_LINK_FIELD: job_ids,
@@ -237,19 +355,26 @@ class DatabaseService:
             "Requires Empty Truck": bool(delivery.requires_empty_truck) if delivery.requires_empty_truck is not None else False,
             settings.DELIVERIES_DRIVER_FIELD: delivery.drivers,
             settings.DELIVERIES_STATUS_FIELD: getattr(delivery, "status", None),
-            settings.DELIVERIES_STATUS_UPDATED_FIELD: getattr(delivery, "status_updated_at", None),
-            settings.DELIVERIES_ARRIVED_AT_FIELD: getattr(delivery, "arrived_at", None),
-            settings.DELIVERIES_DELIVERED_AT_FIELD: getattr(delivery, "delivered_at", None),
+            settings.DELIVERIES_STATUS_UPDATED_FIELD: status_updated_at,
+            settings.DELIVERIES_ARRIVED_AT_FIELD: arrived_at,
+            settings.DELIVERIES_DELIVERED_AT_FIELD: delivered_at,
             settings.DELIVERIES_DRIVER_LAT_FIELD: getattr(delivery, "driver_latitude", None),
             settings.DELIVERIES_DRIVER_LON_FIELD: getattr(delivery, "driver_longitude", None),
             settings.DELIVERIES_DRIVER_NOTES_FIELD: delivery.delivery_notes,
             "Window Start": delivery.window_start,
             "Window End": delivery.window_end,
             settings.DELIVERIES_PACKING_SLIP_FIELD: delivery.packing_slip,
+            "Route Sequence": getattr(delivery, "route_sequence", None),
+            "Updated At": updated_at,
         }
         return {"id": str(delivery.delivery_id), "fields": fields}
 
     def _user_record(self, user: User) -> Dict[str, Any]:
+        session_expires = (
+            user.session_expires.isoformat()
+            if isinstance(user.session_expires, datetime)
+            else user.session_expires
+        )
         fields = {
             settings.USERS_EMAIL_FIELD: user.email,
             settings.USERS_PASSWORD_FIELD: user.password_hash,
@@ -257,7 +382,7 @@ class DatabaseService:
             settings.USERS_ACTIVE_FIELD: user.active,
             settings.USERS_NAME_FIELD: user.name,
             settings.USERS_SESSION_TOKEN_FIELD: user.session_token,
-            settings.USERS_SESSION_EXPIRES_FIELD: user.session_expires,
+            settings.USERS_SESSION_EXPIRES_FIELD: session_expires,
         }
         return {"id": user.email, "fields": fields}
 
@@ -269,6 +394,11 @@ class DatabaseService:
     def _plan_record(self, plan: PublishedPlan) -> Dict[str, Any]:
         plan_date = plan.plan_date.isoformat() if plan.plan_date else None
         plan_type = self._normalize_plan_type(getattr(plan, "plan_type", None))
+        published_at = (
+            plan.published_at.isoformat()
+            if isinstance(plan.published_at, datetime)
+            else plan.published_at
+        )
         fields = {
             settings.PUBLISHED_PLANS_DATE_FIELD: plan_date,
             settings.PUBLISHED_PLANS_TYPE_FIELD: plan_type,
@@ -279,10 +409,10 @@ class DatabaseService:
             settings.PUBLISHED_PLANS_DRIVER_PROFILES_FIELD: plan.driver_profiles_json,
             settings.PUBLISHED_PLANS_STATUS_FIELD: plan.status,
             settings.PUBLISHED_PLANS_PUBLISHED_BY_FIELD: plan.published_by,
-            settings.PUBLISHED_PLANS_UPDATED_AT_FIELD: plan.published_at,
+            settings.PUBLISHED_PLANS_UPDATED_AT_FIELD: published_at,
         }
         record_id = f"{plan_date}::{plan_type}" if plan_date else ""
-        return {"id": record_id, "fields": fields, "createdTime": plan.published_at}
+        return {"id": record_id, "fields": fields, "createdTime": published_at}
 
     def _legacy_plan_record(self, row: Dict[str, Any]) -> Dict[str, Any]:
         plan_date_val = row.get("Plan Date")
@@ -304,6 +434,11 @@ class DatabaseService:
     def _plan_payload(self, plan: PublishedPlan) -> Dict[str, Any]:
         plan_date = plan.plan_date.isoformat() if plan.plan_date else None
         plan_type = self._normalize_plan_type(getattr(plan, "plan_type", None))
+        updated_at = (
+            plan.published_at.isoformat()
+            if isinstance(plan.published_at, datetime)
+            else plan.published_at
+        )
         return {
             "plan_date": plan_date,
             "plan_type": plan_type,
@@ -313,7 +448,7 @@ class DatabaseService:
             "fleet": self._json_load(plan.fleet_json, {}),
             "driver_profiles": self._json_load(plan.driver_profiles_json, []),
             "status": plan.status,
-            "updated_at": plan.published_at,
+            "updated_at": updated_at,
             "updated_by": plan.published_by,
         }
 
@@ -347,7 +482,7 @@ class DatabaseService:
         if "status" in fields:
             plan.status = self._first_str(fields.get("status")) if fields.get("status") not in (None, "") else None
         if "updated_at" in fields:
-            plan.published_at = fields.get("updated_at")
+            plan.published_at = self._coerce_datetime(fields.get("updated_at"))
         if "updated_by" in fields:
             plan.published_by = fields.get("updated_by")
 
@@ -355,6 +490,8 @@ class DatabaseService:
         normalized_type = self._normalize_plan_type(plan_type)
         with SessionLocal() as session:
             if not self._supports_published_plan_type(session.bind):
+                if not self._table_exists("Published Plans", session.bind):
+                    return []
                 if normalized_type != "published":
                     return []
                 rows = session.execute(
@@ -402,6 +539,8 @@ class DatabaseService:
         normalized_type = self._normalize_plan_type(plan_type)
         with SessionLocal() as session:
             if not self._supports_published_plan_type(session.bind):
+                if not self._table_exists("Published Plans", session.bind):
+                    return None
                 if normalized_type != "published":
                     return None
                 row = session.execute(
@@ -442,6 +581,8 @@ class DatabaseService:
         normalized_type = self._normalize_plan_type(plan_type)
         with SessionLocal() as session:
             if not self._supports_published_plan_type(session.bind):
+                if not self._table_exists("Published Plans", session.bind):
+                    raise ValueError("Published plans storage is not configured.")
                 if normalized_type != "published":
                     raise ValueError(
                         'Published Plans schema is missing "Plan Type". Add the column before saving plan records.'
@@ -511,6 +652,8 @@ class DatabaseService:
                 plan = PublishedPlan(plan_date=plan_dt, plan_type=normalized_type)
                 session.add(plan)
             self._apply_plan_payload_fields(plan, fields)
+            if hasattr(plan, "updated_at"):
+                plan.updated_at = datetime.now(ZoneInfo("UTC"))
             session.commit()
             session.refresh(plan)
             self._invalidate_cache(settings.PUBLISHED_PLANS_TABLE)
@@ -555,11 +698,11 @@ class DatabaseService:
             elif key == settings.DELIVERIES_STATUS_FIELD or key == "Status":
                 delivery.status = self._first_str(value) if value not in (None, "") else None
             elif key == settings.DELIVERIES_STATUS_UPDATED_FIELD or key == "Status Updated At":
-                delivery.status_updated_at = self._first_str(value) if value not in (None, "") else None
+                delivery.status_updated_at = self._coerce_datetime(value)
             elif key == settings.DELIVERIES_ARRIVED_AT_FIELD or key == "Arrived At":
-                delivery.arrived_at = self._first_str(value) if value not in (None, "") else None
+                delivery.arrived_at = self._coerce_datetime(value)
             elif key == settings.DELIVERIES_DELIVERED_AT_FIELD or key == "Delivered At":
-                delivery.delivered_at = self._first_str(value) if value not in (None, "") else None
+                delivery.delivered_at = self._coerce_datetime(value)
             elif key == settings.DELIVERIES_DRIVER_LAT_FIELD or key == "Driver Latitude":
                 delivery.driver_latitude = self._coerce_float(value)
             elif key == settings.DELIVERIES_DRIVER_LON_FIELD or key == "Driver Longitude":
@@ -572,6 +715,8 @@ class DatabaseService:
                 delivery.window_end = self._first_str(value) if value not in (None, "") else None
             elif key == settings.DELIVERIES_PACKING_SLIP_FIELD:
                 delivery.packing_slip = self._coerce_int(value)
+            elif key == "Route Sequence":
+                delivery.route_sequence = self._coerce_int(value)
 
     def _apply_jobsite_fields(self, jobsite: Jobsite, fields: Dict[str, Any]) -> None:
         for key, value in (fields or {}).items():
@@ -607,7 +752,7 @@ class DatabaseService:
             elif key == settings.USERS_SESSION_TOKEN_FIELD:
                 user.session_token = self._first_str(value) if value not in (None, "") else None
             elif key == settings.USERS_SESSION_EXPIRES_FIELD:
-                user.session_expires = self._first_str(value) if value not in (None, "") else None
+                user.session_expires = self._coerce_datetime(value)
 
     def _apply_plan_fields(self, plan: PublishedPlan, fields: Dict[str, Any]) -> None:
         for key, value in (fields or {}).items():
@@ -630,24 +775,24 @@ class DatabaseService:
             elif key == settings.PUBLISHED_PLANS_PUBLISHED_BY_FIELD:
                 plan.published_by = self._first_str(value) if value not in (None, "") else None
             elif key == settings.PUBLISHED_PLANS_UPDATED_AT_FIELD:
-                plan.published_at = self._first_str(value) if value not in (None, "") else None
+                plan.published_at = self._coerce_datetime(value)
 
     def _get_record_by_pk(self, session, table_name: str, record_id: str):
-        if table_name == "Deliveries":
+        if self._is_deliveries_table(table_name):
             try:
                 pk = int(record_id)
             except Exception:
                 return None
             return session.get(Delivery, pk)
-        if table_name == "Jobsites":
+        if self._is_jobsites_table(table_name):
             try:
                 pk = int(record_id)
             except Exception:
                 return None
             return session.get(Jobsite, pk)
-        if table_name == settings.USERS_TABLE:
+        if self._is_users_table(table_name):
             return session.get(User, str(record_id))
-        if table_name == settings.PUBLISHED_PLANS_TABLE:
+        if self._is_published_plans_table(table_name):
             raw_id = str(record_id or "").strip()
             if "::" in raw_id:
                 date_part, type_part = raw_id.split("::", 1)
@@ -799,6 +944,8 @@ class DatabaseService:
                     value = item.get("window_end")
                     delivery.window_end = self._first_str(value) if value not in (None, "") else None
 
+                if hasattr(delivery, "updated_at"):
+                    delivery.updated_at = datetime.now(ZoneInfo("UTC"))
                 updated_ids.append(str(delivery.delivery_id))
             session.commit()
         if updated_ids:
@@ -815,22 +962,22 @@ class DatabaseService:
             if cached is not None:
                 return cached
         with SessionLocal() as session:
-            if table_name == "Jobsites":
+            if self._is_jobsites_table(table_name):
                 records = session.execute(select(Jobsite)).scalars().all()
                 data = [self._jobsite_record(r) for r in records]
                 self._set_cached_table(table_name, data)
                 return data
-            if table_name == "Deliveries":
+            if self._is_deliveries_table(table_name):
                 records = session.execute(select(Delivery)).scalars().all()
                 data = [self._delivery_record(r) for r in records]
                 self._set_cached_table(table_name, data)
                 return data
-            if table_name == settings.USERS_TABLE:
+            if self._is_users_table(table_name):
                 records = session.execute(select(User)).scalars().all()
                 data = [self._user_record(r) for r in records]
                 self._set_cached_table(table_name, data)
                 return data
-            if table_name == settings.PUBLISHED_PLANS_TABLE:
+            if self._is_published_plans_table(table_name):
                 data = self.list_published_plans(force_refresh=force_refresh, plan_type="published")
                 self._set_cached_table(table_name, data)
                 return data
@@ -841,19 +988,19 @@ class DatabaseService:
             rec = self._get_record_by_pk(session, table_name, record_id)
             if not rec:
                 raise ValueError("Record not found.")
-            if table_name == "Jobsites":
+            if self._is_jobsites_table(table_name):
                 return self._jobsite_record(rec)
-            if table_name == "Deliveries":
+            if self._is_deliveries_table(table_name):
                 return self._delivery_record(rec)
-            if table_name == settings.USERS_TABLE:
+            if self._is_users_table(table_name):
                 return self._user_record(rec)
-            if table_name == settings.PUBLISHED_PLANS_TABLE:
+            if self._is_published_plans_table(table_name):
                 return self._plan_record(rec)
         raise ValueError(f"Unsupported table: {table_name}")
 
     def create_record(self, table_name: str, fields: Dict[str, Any]) -> Dict[str, Any]:
         with SessionLocal() as session:
-            if table_name == "Jobsites":
+            if self._is_jobsites_table(table_name):
                 jobsite = Jobsite(name="")
                 self._apply_jobsite_fields(jobsite, fields)
                 session.add(jobsite)
@@ -861,7 +1008,7 @@ class DatabaseService:
                 session.refresh(jobsite)
                 self._invalidate_cache("Jobsites")
                 return self._jobsite_record(jobsite)
-            if table_name == "Deliveries":
+            if self._is_deliveries_table(table_name):
                 delivery = Delivery()
                 self._apply_delivery_fields(delivery, fields)
                 session.add(delivery)
@@ -869,7 +1016,7 @@ class DatabaseService:
                 session.refresh(delivery)
                 self._invalidate_cache("Deliveries")
                 return self._delivery_record(delivery)
-            if table_name == settings.USERS_TABLE:
+            if self._is_users_table(table_name):
                 user = User(email="")
                 self._apply_user_fields(user, fields)
                 session.add(user)
@@ -877,7 +1024,7 @@ class DatabaseService:
                 session.refresh(user)
                 self._invalidate_cache(settings.USERS_TABLE)
                 return self._user_record(user)
-            if table_name == settings.PUBLISHED_PLANS_TABLE:
+            if self._is_published_plans_table(table_name):
                 plan_date = self._coerce_date(fields.get(settings.PUBLISHED_PLANS_DATE_FIELD)) or date.today()
                 plan_type = self._normalize_plan_type(fields.get(settings.PUBLISHED_PLANS_TYPE_FIELD), default="published")
                 plan = PublishedPlan(plan_date=plan_date, plan_type=plan_type)
@@ -894,26 +1041,34 @@ class DatabaseService:
             rec = self._get_record_by_pk(session, table_name, record_id)
             if not rec:
                 raise ValueError("Record not found.")
-            if table_name == "Jobsites":
+            if self._is_jobsites_table(table_name):
                 self._apply_jobsite_fields(rec, fields)
+                if hasattr(rec, "updated_at"):
+                    rec.updated_at = datetime.now(ZoneInfo("UTC"))
                 session.commit()
                 session.refresh(rec)
                 self._invalidate_cache("Jobsites")
                 return self._jobsite_record(rec)
-            if table_name == "Deliveries":
+            if self._is_deliveries_table(table_name):
                 self._apply_delivery_fields(rec, fields)
+                if hasattr(rec, "updated_at"):
+                    rec.updated_at = datetime.now(ZoneInfo("UTC"))
                 session.commit()
                 session.refresh(rec)
                 self._invalidate_cache("Deliveries")
                 return self._delivery_record(rec)
-            if table_name == settings.USERS_TABLE:
+            if self._is_users_table(table_name):
                 self._apply_user_fields(rec, fields)
+                if hasattr(rec, "updated_at"):
+                    rec.updated_at = datetime.now(ZoneInfo("UTC"))
                 session.commit()
                 session.refresh(rec)
                 self._invalidate_cache(settings.USERS_TABLE)
                 return self._user_record(rec)
-            if table_name == settings.PUBLISHED_PLANS_TABLE:
+            if self._is_published_plans_table(table_name):
                 self._apply_plan_fields(rec, fields)
+                if hasattr(rec, "updated_at"):
+                    rec.updated_at = datetime.now(ZoneInfo("UTC"))
                 session.commit()
                 session.refresh(rec)
                 self._invalidate_cache(settings.PUBLISHED_PLANS_TABLE)
@@ -925,13 +1080,13 @@ class DatabaseService:
             rec = self._get_record_by_pk(session, table_name, record_id)
             if not rec:
                 raise ValueError("Record not found.")
-            if table_name == "Jobsites":
+            if self._is_jobsites_table(table_name):
                 payload = self._jobsite_record(rec)
-            elif table_name == "Deliveries":
+            elif self._is_deliveries_table(table_name):
                 payload = self._delivery_record(rec)
-            elif table_name == settings.USERS_TABLE:
+            elif self._is_users_table(table_name):
                 payload = self._user_record(rec)
-            elif table_name == settings.PUBLISHED_PLANS_TABLE:
+            elif self._is_published_plans_table(table_name):
                 payload = self._plan_record(rec)
             else:
                 raise ValueError(f"Unsupported table: {table_name}")
@@ -987,6 +1142,8 @@ class DatabaseService:
     def _json_load(self, value, default):
         if not value:
             return default
+        if isinstance(value, (dict, list)):
+            return value
         try:
             return json.loads(value)
         except Exception:
@@ -1055,6 +1212,7 @@ class DatabaseService:
                 "status_updated_at": status_updated_at,
                 "arrived_at": arrived_at,
                 "delivered_at": delivered_at,
+                "route_sequence": self._coerce_int(fields.get("Route Sequence")),
                 "driver_lat": driver_lat,
                 "driver_lon": driver_lon,
                 "driver_notes": driver_notes,
@@ -1072,10 +1230,678 @@ class DatabaseService:
                 "requires_empty_truck": self._to_bool(fields.get("Requires Empty Truck")),
                 "window_start": self._first_str(fields.get("Window Start")),
                 "window_end": self._first_str(fields.get("Window End")),
+                "updated_at": self._first_str(fields.get("Updated At")),
             })
 
         out.sort(key=lambda x: (x["scheduled_date"] or "", x["delivery_id"] or ""))
         return out
+
+    @staticmethod
+    def _route_driver_name_from_payload(route: Dict[str, Any]) -> str:
+        profile = route.get("driver_profile")
+        if isinstance(profile, dict):
+            for key in ("name", "email", "id"):
+                value = str(profile.get(key) or "").strip()
+                if value:
+                    return value
+        elif isinstance(profile, str):
+            value = profile.strip()
+            if value:
+                return value
+        return str(route.get("driver") or "").strip()
+
+    @staticmethod
+    def _route_delivery_assignments(route: Dict[str, Any]) -> List[tuple[str, int]]:
+        assigned: List[tuple[str, int]] = []
+        stops = route.get("stops")
+        if isinstance(stops, list):
+            for stop_index, stop in enumerate(stops, start=1):
+                group = stop if isinstance(stop, list) else [stop]
+                for item in group:
+                    if isinstance(item, dict):
+                        if bool(item.get("custom_stop")):
+                            continue
+                        if str(item.get("type") or "").strip().lower() != "delivery":
+                            continue
+                        delivery_id = str(item.get("id") or item.get("delivery_id") or "").strip()
+                        if delivery_id:
+                            assigned.append((delivery_id, stop_index))
+                    elif isinstance(item, (str, int)):
+                        token = str(item).strip()
+                        if not token or token.lower() in {"depot", "depot - reload"}:
+                            continue
+                        base_id = token.split("_Part", 1)[0].strip()
+                        if base_id:
+                            assigned.append((base_id, stop_index))
+        elif isinstance(route.get("jobs"), list):
+            for stop_index, stop in enumerate(route.get("jobs") or [], start=1):
+                if not isinstance(stop, list):
+                    continue
+                for token in stop:
+                    raw = str(token or "").strip()
+                    if not raw or raw.lower() in {"depot", "depot - reload"}:
+                        continue
+                    base_id = raw.split("_Part", 1)[0].strip()
+                    if base_id:
+                        assigned.append((base_id, stop_index))
+        return assigned
+
+    def build_delivery_plan_payload(self, plan_date: str | date, force_refresh: bool = False) -> Dict[str, Any]:
+        target_date = self._coerce_date(plan_date)
+        if not target_date:
+            raise ValueError("Invalid plan_date.")
+
+        target_iso = target_date.isoformat()
+        rows = [row for row in self.list_deliveries_min(force_refresh=force_refresh) if row.get("scheduled_date") == target_iso]
+        if not rows:
+            return {
+                "plan_date": target_iso,
+                "routes": [],
+                "deliveries": [],
+                "meta": {
+                    "source": "deliveries",
+                    "depot_lat": settings.DEPOT_LAT,
+                    "depot_lon": settings.DEPOT_LON,
+                    "plan_date": target_iso,
+                },
+                "fleet": {},
+                "driver_profiles": [],
+                "status": "Live",
+                "updated_at": None,
+                "updated_by": None,
+            }
+
+        deliveries: List[Dict[str, Any]] = []
+        route_groups: Dict[str, List[Dict[str, Any]]] = {}
+        latest_update: datetime | None = None
+
+        for row in rows:
+            delivery_id = str(row.get("delivery_id") or "").strip()
+            if not delivery_id:
+                continue
+            med_skid = self._coerce_int(row.get("med_skid")) or 0
+            small_skid = self._coerce_int(row.get("small_skid")) or 0
+            large_skid = self._coerce_int(row.get("large_skid")) or 0
+            door = self._coerce_int(row.get("door")) or 0
+            frame = self._coerce_int(row.get("frame")) or 0
+            exp_frame = self._coerce_int(row.get("exp_frame")) or 0
+            pickup_flag = self._to_bool(row.get("pickup"))
+            pickup_vehicle = self._normalize_pickup_vehicle(row.get("pickup_vehicle"))
+            if pickup_flag and not pickup_vehicle:
+                pickup_vehicle = "both"
+            if not pickup_flag:
+                pickup_vehicle = ""
+
+            delivery = {
+                "id": delivery_id,
+                "delivery_id": delivery_id,
+                "jobsite_id": self._first_str(row.get("jobsite_id")),
+                "job_name": self._first_str(row.get("job_name")),
+                "job_address": self._first_str(row.get("job_address")),
+                "sales_order": self._first_str(row.get("sales_order")),
+                "packing_slip": self._first_str(row.get("packing_slip")),
+                "driver": self._first_str(row.get("driver")),
+                "status": self._first_str(row.get("status")),
+                "status_updated_at": self._first_str(row.get("status_updated_at")),
+                "arrived_at": self._first_str(row.get("arrived_at")),
+                "delivered_at": self._first_str(row.get("delivered_at")),
+                "ps_delivered": self._to_bool(row.get("ps_delivered")),
+                "route_sequence": self._coerce_int(row.get("route_sequence")),
+                "scheduled_date": target_iso,
+                "med_skid": med_skid,
+                "small_skid": small_skid,
+                "large_skid": large_skid,
+                "door": door,
+                "frame": frame,
+                "exp_frame": exp_frame,
+                "box": self._coerce_int(row.get("box")) or 0,
+                "pickup": pickup_flag,
+                "pickup_vehicle": pickup_vehicle,
+                "requires_empty_truck": self._to_bool(row.get("requires_empty_truck")),
+                "window_start": self._first_str(row.get("window_start")),
+                "window_end": self._first_str(row.get("window_end")),
+                "capacity_units": (
+                    med_skid * int(getattr(settings, "MED_SKID_UNITS", getattr(settings, "LONG_SKID_UNITS", 20)))
+                    + large_skid * int(getattr(settings, "LARGE_SKID_UNITS", 25))
+                    + small_skid * int(getattr(settings, "SMALL_SKID_UNITS", 10))
+                    + (frame + exp_frame) * int(getattr(settings, "FRAME_UNITS", 1))
+                ),
+            }
+            delivery["requires_truck"] = bool(
+                delivery["door"] > 0
+                or delivery["frame"] > 0
+                or delivery["exp_frame"] > 0
+                or delivery["med_skid"] > 0
+                or delivery["small_skid"] > 0
+                or delivery["large_skid"] > 0
+                or (pickup_flag and (pickup_vehicle == "truck" or delivery["requires_empty_truck"]))
+            )
+            deliveries.append(delivery)
+
+            driver_name = self._first_str(row.get("driver")) or "Unassigned"
+            route_groups.setdefault(driver_name, []).append(delivery)
+
+            updated_at = self._coerce_datetime(delivery.get("status_updated_at"))
+            if updated_at and (latest_update is None or updated_at > latest_update):
+                latest_update = updated_at
+            row_updated_at = self._coerce_datetime(row.get("updated_at"))
+            if row_updated_at and (latest_update is None or row_updated_at > latest_update):
+                latest_update = row_updated_at
+
+        routes: List[Dict[str, Any]] = []
+        driver_profiles: List[Dict[str, Any]] = []
+        sorted_driver_names = sorted(route_groups.keys(), key=lambda name: name.lower())
+        for idx, driver_name in enumerate(sorted_driver_names, start=1):
+            grouped = route_groups.get(driver_name) or []
+            grouped.sort(
+                key=lambda item: (
+                    item.get("route_sequence") if item.get("route_sequence") is not None else 2147483647,
+                    str(item.get("delivery_id") or ""),
+                )
+            )
+            stops: List[List[Dict[str, Any]]] = []
+            stop_times: List[Dict[str, Any]] = []
+            for item in grouped:
+                stops.append(
+                    [
+                        {
+                            "type": "delivery",
+                            "id": item.get("delivery_id"),
+                            "job_name": item.get("job_name"),
+                            "med_skid": item.get("med_skid"),
+                            "small_skid": item.get("small_skid"),
+                            "large_skid": item.get("large_skid"),
+                            "door": item.get("door"),
+                            "frame": item.get("frame"),
+                            "exp_frame": item.get("exp_frame"),
+                            "box": item.get("box"),
+                        }
+                    ]
+                )
+                stop_times.append(
+                    {
+                        "arrival_hhmm": self._format_time_value(item.get("window_start")),
+                        "departure_hhmm": self._format_time_value(item.get("window_end")),
+                    }
+                )
+            route: Dict[str, Any] = {
+                "vehicle_id": idx,
+                "vehicle_type": "truck",
+                "driver": "" if driver_name == "Unassigned" else driver_name,
+                "stops": stops,
+                "stop_times": stop_times,
+                "total_distance_m": 0,
+                "total_time_s": 0,
+            }
+            if driver_name != "Unassigned":
+                route["driver_profile"] = {"name": driver_name}
+                driver_profiles.append({"name": driver_name})
+            routes.append(route)
+
+        return {
+            "plan_date": target_iso,
+            "routes": routes,
+            "deliveries": deliveries,
+            "meta": {
+                "source": "deliveries",
+                "depot_lat": settings.DEPOT_LAT,
+                "depot_lon": settings.DEPOT_LON,
+                "plan_date": target_iso,
+                "driver_assignments": {
+                    str(route.get("vehicle_id")): route.get("driver")
+                    for route in routes
+                    if str(route.get("driver") or "").strip()
+                },
+            },
+            "fleet": {
+                "trucks": len(routes),
+                "vans": 0,
+            },
+            "driver_profiles": driver_profiles,
+            "status": "Live",
+            "updated_at": latest_update.isoformat() if latest_update else None,
+            "updated_by": None,
+        }
+
+    def apply_route_assignments(
+        self,
+        plan_date: str | date,
+        routes: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        target_date = self._coerce_date(plan_date)
+        if not target_date:
+            raise ValueError("Invalid plan_date.")
+
+        assignments: Dict[int, Dict[str, Any]] = {}
+        for route in routes or []:
+            if not isinstance(route, dict):
+                continue
+            driver_name = self._route_driver_name_from_payload(route)
+            route_assignments = self._route_delivery_assignments(route)
+            seen: set[int] = set()
+            for raw_id, stop_seq in route_assignments:
+                try:
+                    delivery_id = int(str(raw_id).strip())
+                except Exception:
+                    continue
+                if delivery_id in seen:
+                    continue
+                seen.add(delivery_id)
+                assignments[delivery_id] = {
+                    "driver_name": driver_name.strip() or None,
+                    "route_sequence": stop_seq,
+                }
+
+        touched = 0
+        assigned = 0
+        with SessionLocal() as session:
+            deliveries = session.execute(
+                select(Delivery).where(Delivery.scheduled_date == target_date)
+            ).scalars().all()
+            now_utc = datetime.now(ZoneInfo("UTC"))
+            for delivery in deliveries:
+                touched += 1
+                payload = assignments.get(int(delivery.delivery_id))
+                if payload:
+                    delivery.drivers = payload.get("driver_name")
+                    delivery.route_sequence = payload.get("route_sequence")
+                    assigned += 1
+                else:
+                    delivery.drivers = None
+                    delivery.route_sequence = None
+                if hasattr(delivery, "updated_at"):
+                    delivery.updated_at = now_utc
+            session.commit()
+
+        self._invalidate_cache("Deliveries")
+        return {
+            "date": target_date.isoformat(),
+            "touched": touched,
+            "assigned": assigned,
+            "unassigned": max(0, touched - assigned),
+        }
+
+    @staticmethod
+    def _live_route_key(driver_name: str) -> str:
+        normalized = re.sub(r"[^a-z0-9]+", "-", (driver_name or "").strip().lower())
+        normalized = normalized.strip("-")
+        return f"driver:{normalized or 'unassigned'}"
+
+    @staticmethod
+    def _iso_datetime(value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, datetime):
+            return value.isoformat()
+        return str(value)
+
+    @staticmethod
+    def _normalize_progress_from_delivery(delivery: Dict[str, Any]) -> tuple[str, str, str]:
+        status_raw = str(delivery.get("status") or "").strip().lower().replace("-", "_").replace(" ", "_")
+        delivered_at = str(delivery.get("delivered_at") or "").strip()
+        status_updated = str(delivery.get("status_updated_at") or "").strip()
+        arrived_at = str(delivery.get("arrived_at") or "").strip()
+        ps_delivered = bool(delivery.get("ps_delivered"))
+
+        if status_raw == "failed":
+            return "failed", "Failed", status_updated or arrived_at
+        if status_raw == "delivered" or delivered_at or ps_delivered:
+            return "done", "Delivered", delivered_at or status_updated or arrived_at
+        if status_raw == "arrived":
+            return "current", "Arrived", status_updated or arrived_at
+        if status_raw in {"en_route", "in_progress"}:
+            return "current", "En Route", status_updated or arrived_at
+        return "upcoming", "Upcoming", ""
+
+    def list_live_route_rows(self, live_date: str | date | None = None, force_refresh: bool = False) -> List[Dict[str, Any]]:
+        target_date = self._coerce_date(live_date)
+        if not target_date:
+            target_date = datetime.now(ZoneInfo(settings.BUSINESS_TZ)).date()
+
+        with SessionLocal() as session:
+            if self._supports_live_views(session.bind):
+                rows = session.execute(
+                    text(
+                        """
+                        SELECT
+                            live_date,
+                            route_key,
+                            driver_name,
+                            delivery_id,
+                            jobsite_id,
+                            job_name,
+                            job_address,
+                            sales_order,
+                            packing_slip,
+                            route_sequence,
+                            status_code,
+                            progress_state,
+                            status_label,
+                            status_time,
+                            status_updated_at,
+                            arrived_at,
+                            delivered_at,
+                            driver_latitude,
+                            driver_longitude,
+                            med_skid,
+                            small_skid,
+                            large_skid,
+                            door,
+                            frame,
+                            exp_frame,
+                            box,
+                            pickup,
+                            pickup_vehicle,
+                            requires_empty_truck,
+                            window_start,
+                            window_end,
+                            delivery_notes
+                        FROM public.v_route_live
+                        WHERE live_date = :live_date
+                        ORDER BY
+                            lower(driver_name),
+                            COALESCE(route_sequence, 2147483647),
+                            delivery_id
+                        """
+                    ),
+                    {"live_date": target_date},
+                ).mappings().all()
+                output: List[Dict[str, Any]] = []
+                for row in rows:
+                    output.append(
+                        {
+                            "live_date": str(row.get("live_date") or ""),
+                            "route_key": self._first_str(row.get("route_key")),
+                            "driver_name": self._first_str(row.get("driver_name")),
+                            "delivery_id": self._first_str(row.get("delivery_id")),
+                            "jobsite_id": self._first_str(row.get("jobsite_id")),
+                            "job_name": self._first_str(row.get("job_name")),
+                            "job_address": self._first_str(row.get("job_address")),
+                            "sales_order": self._first_str(row.get("sales_order")),
+                            "packing_slip": self._first_str(row.get("packing_slip")),
+                            "route_sequence": row.get("route_sequence"),
+                            "status_code": self._first_str(row.get("status_code")),
+                            "progress_state": self._first_str(row.get("progress_state")) or "upcoming",
+                            "status_label": self._first_str(row.get("status_label")) or "Upcoming",
+                            "status_time": self._iso_datetime(row.get("status_time")),
+                            "status_updated_at": self._iso_datetime(row.get("status_updated_at")),
+                            "arrived_at": self._iso_datetime(row.get("arrived_at")),
+                            "delivered_at": self._iso_datetime(row.get("delivered_at")),
+                            "driver_latitude": row.get("driver_latitude"),
+                            "driver_longitude": row.get("driver_longitude"),
+                            "med_skid": int(row.get("med_skid") or 0),
+                            "small_skid": int(row.get("small_skid") or 0),
+                            "large_skid": int(row.get("large_skid") or 0),
+                            "door": int(row.get("door") or 0),
+                            "frame": int(row.get("frame") or 0),
+                            "exp_frame": int(row.get("exp_frame") or 0),
+                            "box": int(row.get("box") or 0),
+                            "pickup": bool(row.get("pickup")),
+                            "pickup_vehicle": self._first_str(row.get("pickup_vehicle")),
+                            "requires_empty_truck": bool(row.get("requires_empty_truck")),
+                            "window_start": self._first_str(row.get("window_start")),
+                            "window_end": self._first_str(row.get("window_end")),
+                            "delivery_notes": self._first_str(row.get("delivery_notes")),
+                        }
+                    )
+                return output
+
+        # Fallback path for deployments where the live SQL views are not yet migrated.
+        target_iso = target_date.isoformat()
+        deliveries = self.list_deliveries_min(force_refresh=force_refresh)
+        output: List[Dict[str, Any]] = []
+        for item in deliveries:
+            scheduled = self._first_str(item.get("scheduled_date"))
+            if scheduled != target_iso:
+                continue
+            driver_name = self._first_str(item.get("driver")) or "Unassigned"
+            progress_state, status_label, status_time = self._normalize_progress_from_delivery(item)
+            output.append(
+                {
+                    "live_date": target_iso,
+                    "route_key": self._live_route_key(driver_name),
+                    "driver_name": driver_name,
+                    "delivery_id": self._first_str(item.get("delivery_id")),
+                    "jobsite_id": self._first_str(item.get("jobsite_id")),
+                    "job_name": self._first_str(item.get("job_name")) or f"Delivery {self._first_str(item.get('delivery_id'))}",
+                    "job_address": self._first_str(item.get("job_address")),
+                    "sales_order": self._first_str(item.get("sales_order")),
+                    "packing_slip": self._first_str(item.get("packing_slip")),
+                    "route_sequence": self._coerce_int(item.get("route_sequence")),
+                    "status_code": self._first_str(item.get("status")),
+                    "progress_state": progress_state,
+                    "status_label": status_label,
+                    "status_time": status_time,
+                    "status_updated_at": self._first_str(item.get("status_updated_at")),
+                    "arrived_at": self._first_str(item.get("arrived_at")),
+                    "delivered_at": self._first_str(item.get("delivered_at")),
+                    "driver_latitude": item.get("driver_lat"),
+                    "driver_longitude": item.get("driver_lon"),
+                    "med_skid": self._coerce_int(item.get("med_skid")) or 0,
+                    "small_skid": self._coerce_int(item.get("small_skid")) or 0,
+                    "large_skid": self._coerce_int(item.get("large_skid")) or 0,
+                    "door": self._coerce_int(item.get("door")) or 0,
+                    "frame": self._coerce_int(item.get("frame")) or 0,
+                    "exp_frame": self._coerce_int(item.get("exp_frame")) or 0,
+                    "box": self._coerce_int(item.get("box")) or 0,
+                    "pickup": self._to_bool(item.get("pickup")),
+                    "pickup_vehicle": self._first_str(item.get("pickup_vehicle")),
+                    "requires_empty_truck": self._to_bool(item.get("requires_empty_truck")),
+                    "window_start": self._first_str(item.get("window_start")),
+                    "window_end": self._first_str(item.get("window_end")),
+                    "delivery_notes": self._first_str(item.get("driver_notes")),
+                }
+            )
+
+        output.sort(
+            key=lambda row: (
+                (row.get("driver_name") or "").lower(),
+                row.get("route_sequence") if row.get("route_sequence") is not None else 2147483647,
+                row.get("delivery_id") or "",
+            )
+        )
+        return output
+
+    def list_live_driver_progress(self, live_date: str | date | None = None, force_refresh: bool = False) -> List[Dict[str, Any]]:
+        target_date = self._coerce_date(live_date)
+        if not target_date:
+            target_date = datetime.now(ZoneInfo(settings.BUSINESS_TZ)).date()
+
+        with SessionLocal() as session:
+            if self._supports_live_views(session.bind):
+                rows = session.execute(
+                    text(
+                        """
+                        SELECT
+                            live_date,
+                            route_key,
+                            driver_name,
+                            total_stops,
+                            done_stops,
+                            current_stops,
+                            upcoming_stops,
+                            failed_stops,
+                            last_completed_at,
+                            last_status_update_at
+                        FROM public.v_driver_progress_live
+                        WHERE live_date = :live_date
+                        ORDER BY lower(driver_name), route_key
+                        """
+                    ),
+                    {"live_date": target_date},
+                ).mappings().all()
+                output: List[Dict[str, Any]] = []
+                for row in rows:
+                    output.append(
+                        {
+                            "live_date": str(row.get("live_date") or ""),
+                            "route_key": self._first_str(row.get("route_key")),
+                            "driver_name": self._first_str(row.get("driver_name")),
+                            "total_stops": int(row.get("total_stops") or 0),
+                            "done_stops": int(row.get("done_stops") or 0),
+                            "current_stops": int(row.get("current_stops") or 0),
+                            "upcoming_stops": int(row.get("upcoming_stops") or 0),
+                            "failed_stops": int(row.get("failed_stops") or 0),
+                            "last_completed_at": self._iso_datetime(row.get("last_completed_at")),
+                            "last_status_update_at": self._iso_datetime(row.get("last_status_update_at")),
+                        }
+                    )
+                return output
+
+        rows = self.list_live_route_rows(target_date, force_refresh=force_refresh)
+        grouped: Dict[str, Dict[str, Any]] = {}
+        for row in rows:
+            route_key = self._first_str(row.get("route_key")) or self._live_route_key(self._first_str(row.get("driver_name")))
+            bucket = grouped.setdefault(
+                route_key,
+                {
+                    "live_date": row.get("live_date"),
+                    "route_key": route_key,
+                    "driver_name": self._first_str(row.get("driver_name")) or "Unassigned",
+                    "total_stops": 0,
+                    "done_stops": 0,
+                    "current_stops": 0,
+                    "upcoming_stops": 0,
+                    "failed_stops": 0,
+                    "last_completed_at": "",
+                    "last_status_update_at": "",
+                },
+            )
+            bucket["total_stops"] += 1
+            state = self._first_str(row.get("progress_state")) or "upcoming"
+            if state == "done":
+                bucket["done_stops"] += 1
+                completed_at = self._first_str(row.get("delivered_at"))
+                if completed_at and completed_at > bucket["last_completed_at"]:
+                    bucket["last_completed_at"] = completed_at
+            elif state == "current":
+                bucket["current_stops"] += 1
+            elif state == "failed":
+                bucket["failed_stops"] += 1
+            else:
+                bucket["upcoming_stops"] += 1
+            status_updated = self._first_str(row.get("status_updated_at"))
+            if status_updated and status_updated > bucket["last_status_update_at"]:
+                bucket["last_status_update_at"] = status_updated
+
+        output = list(grouped.values())
+        output.sort(key=lambda row: ((row.get("driver_name") or "").lower(), row.get("route_key") or ""))
+        return output
+
+    def get_live_progress_snapshot(self, live_date: str | date | None = None, force_refresh: bool = False) -> Dict[str, Any]:
+        target_date = self._coerce_date(live_date)
+        if not target_date:
+            target_date = datetime.now(ZoneInfo(settings.BUSINESS_TZ)).date()
+
+        route_rows = self.list_live_route_rows(target_date, force_refresh=force_refresh)
+        driver_rows = self.list_live_driver_progress(target_date, force_refresh=force_refresh)
+
+        routes_by_key: Dict[str, Dict[str, Any]] = {}
+        counts = {"done": 0, "current": 0, "upcoming": 0, "failed": 0}
+        latest_update = ""
+
+        for row in route_rows:
+            route_key = self._first_str(row.get("route_key")) or self._live_route_key(self._first_str(row.get("driver_name")))
+            route = routes_by_key.setdefault(
+                route_key,
+                {
+                    "route_key": route_key,
+                    "driver_name": self._first_str(row.get("driver_name")) or "Unassigned",
+                    "deliveries": [],
+                },
+            )
+            route["deliveries"].append(
+                {
+                    "delivery_id": self._first_str(row.get("delivery_id")),
+                    "jobsite_id": self._first_str(row.get("jobsite_id")),
+                    "job_name": self._first_str(row.get("job_name")),
+                    "job_address": self._first_str(row.get("job_address")),
+                    "sales_order": self._first_str(row.get("sales_order")),
+                    "packing_slip": self._first_str(row.get("packing_slip")),
+                    "route_sequence": row.get("route_sequence"),
+                    "status_code": self._first_str(row.get("status_code")),
+                    "status_label": self._first_str(row.get("status_label")) or "Upcoming",
+                    "status": self._first_str(row.get("progress_state")) or "upcoming",
+                    "status_time": self._first_str(row.get("status_time")),
+                    "status_updated_at": self._first_str(row.get("status_updated_at")),
+                    "arrived_at": self._first_str(row.get("arrived_at")),
+                    "delivered_at": self._first_str(row.get("delivered_at")),
+                    "driver_latitude": row.get("driver_latitude"),
+                    "driver_longitude": row.get("driver_longitude"),
+                    "med_skid": self._coerce_int(row.get("med_skid")) or 0,
+                    "small_skid": self._coerce_int(row.get("small_skid")) or 0,
+                    "large_skid": self._coerce_int(row.get("large_skid")) or 0,
+                    "door": self._coerce_int(row.get("door")) or 0,
+                    "frame": self._coerce_int(row.get("frame")) or 0,
+                    "exp_frame": self._coerce_int(row.get("exp_frame")) or 0,
+                    "box": self._coerce_int(row.get("box")) or 0,
+                    "pickup": self._to_bool(row.get("pickup")),
+                    "pickup_vehicle": self._first_str(row.get("pickup_vehicle")),
+                    "requires_empty_truck": self._to_bool(row.get("requires_empty_truck")),
+                    "window_start": self._first_str(row.get("window_start")),
+                    "window_end": self._first_str(row.get("window_end")),
+                    "delivery_notes": self._first_str(row.get("delivery_notes")),
+                }
+            )
+
+            state = self._first_str(row.get("progress_state")) or "upcoming"
+            if state not in counts:
+                state = "upcoming"
+            counts[state] += 1
+            row_status_update = self._first_str(row.get("status_updated_at"))
+            if row_status_update and row_status_update > latest_update:
+                latest_update = row_status_update
+
+        driver_lookup = {self._first_str(item.get("route_key")): item for item in driver_rows}
+        routes: List[Dict[str, Any]] = []
+        for route_key, route in routes_by_key.items():
+            route_deliveries = route.get("deliveries") or []
+            route_deliveries.sort(
+                key=lambda d: (
+                    d.get("route_sequence") if d.get("route_sequence") is not None else 2147483647,
+                    d.get("delivery_id") or "",
+                )
+            )
+            stats = driver_lookup.get(route_key) or {}
+            total = int(stats.get("total_stops") or len(route_deliveries))
+            done = int(stats.get("done_stops") or 0)
+            current = int(stats.get("current_stops") or 0)
+            upcoming = int(stats.get("upcoming_stops") or 0)
+            failed = int(stats.get("failed_stops") or 0)
+            completion_pct = int(round((done / total) * 100)) if total > 0 else 0
+            routes.append(
+                {
+                    "route_key": route_key,
+                    "driver_name": self._first_str(route.get("driver_name")) or "Unassigned",
+                    "total_stops": total,
+                    "done_stops": done,
+                    "current_stops": current,
+                    "upcoming_stops": upcoming,
+                    "failed_stops": failed,
+                    "completion_pct": completion_pct,
+                    "last_completed_at": self._first_str(stats.get("last_completed_at")),
+                    "last_status_update_at": self._first_str(stats.get("last_status_update_at")),
+                    "deliveries": route_deliveries,
+                }
+            )
+
+        routes.sort(key=lambda item: (item.get("driver_name") or "").lower())
+        total = counts["done"] + counts["current"] + counts["upcoming"] + counts["failed"]
+
+        return {
+            "date": target_date.isoformat(),
+            "summary": {
+                "done": counts["done"],
+                "current": counts["current"],
+                "upcoming": counts["upcoming"],
+                "failed": counts["failed"],
+                "total": total,
+                "completion_pct": int(round((counts["done"] / total) * 100)) if total > 0 else 0,
+            },
+            "routes": routes,
+            "generated_at": datetime.now(ZoneInfo("UTC")).isoformat(),
+            "last_status_update_at": latest_update or None,
+        }
 
     def get_user_by_email(self, email: str) -> Dict[str, Any] | None:
         normalized = self._normalize_email(email)
@@ -1177,6 +2003,8 @@ class DatabaseService:
             if not delivery:
                 return None
             self._apply_delivery_fields(delivery, fields)
+            if hasattr(delivery, "updated_at"):
+                delivery.updated_at = datetime.now(ZoneInfo("UTC"))
             session.commit()
             session.refresh(delivery)
             self._invalidate_cache("Deliveries")
@@ -1193,6 +2021,8 @@ class DatabaseService:
                     return None
                 jobsite.latitude = float(lat)
                 jobsite.longitude = float(lon)
+                if hasattr(jobsite, "updated_at"):
+                    jobsite.updated_at = datetime.now(ZoneInfo("UTC"))
                 session.commit()
                 session.refresh(jobsite)
                 self._invalidate_cache("Jobsites")
@@ -1388,6 +2218,8 @@ class DatabaseService:
         include_all_types = normalized_type in {"all", "*"}
         with SessionLocal() as session:
             if not self._supports_published_plan_type(session.bind):
+                if not self._table_exists("Published Plans", session.bind):
+                    return []
                 if normalized_type not in {"published", "all", "*"}:
                     return []
                 rows = session.execute(

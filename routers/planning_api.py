@@ -1,9 +1,7 @@
 from fastapi import APIRouter, Depends, Form
-import html
 import json
 import logging
 
-from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field, field_validator
 from starlette.requests import Request
 
@@ -232,6 +230,19 @@ def deliveries_all(request: Request):
     svc = DatabaseService()
     deliveries = svc.list_deliveries_min(force_refresh=_wants_refresh(request))
     resp = ok_response(request, {"deliveries": deliveries, "count": len(deliveries)})
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@router.get("/live/today")
+def live_today(request: Request, date: str | None = None):
+    user = get_current_user(request)
+    if not user or user.get("role") not in ("manager", "admin"):
+        raise HTTPException(status_code=403, detail="Manager/Admin access required.")
+    live_date = _require_iso_date_param(date, "date") if date else _business_date(offset_days=0)
+    svc = DatabaseService()
+    payload = svc.get_live_progress_snapshot(live_date=live_date, force_refresh=_wants_refresh(request))
+    resp = ok_response(request, payload)
     resp.headers["Cache-Control"] = "no-store"
     return resp
 
@@ -530,27 +541,25 @@ def plan_publish(payload: PublishPlanRequest, request: Request):
     _set_field(fields, settings.PUBLISHED_PLANS_PUBLISHED_BY_FIELD, user.get("email") or user.get("name") or "manager/admin")
     _set_field(fields, settings.PUBLISHED_PLANS_TYPE_FIELD, "published")
 
+    assignment_result = svc.apply_route_assignments(plan_date, normalized_routes)
+
+    record = {"id": str(plan_date)}
+    stored = False
+    storage_error = None
     try:
         record = svc.upsert_published_plan(plan_date, fields, plan_type="published")
+        stored = True
+    except ValueError:
+        stored = False
     except requests.HTTPError as e:
-        detail = None
+        stored = False
         if e.response is not None:
             try:
-                detail = e.response.json()
+                storage_error = e.response.json()
             except ValueError:
-                detail = e.response.text
-        resp = JSONResponse(
-            {
-                "ok": False,
-                "error": "Database error while publishing plan.",
-                "detail": detail or str(e),
-                "fields": list(fields.keys()),
-                "table": settings.PUBLISHED_PLANS_TABLE,
-            },
-            status_code=400,
-        )
-        resp.headers["Cache-Control"] = "no-store"
-        return resp
+                storage_error = e.response.text
+        else:
+            storage_error = str(e)
 
     try:
         identities = _driver_identities_from_routes(normalized_routes)
@@ -578,6 +587,9 @@ def plan_publish(payload: PublishPlanRequest, request: Request):
             "ok": True,
             "plan_date": plan_date,
             "record_id": record.get("id"),
+            "stored_plan_blob": stored,
+            "assignments": assignment_result,
+            "storage_error": storage_error,
         },
     )
     resp.headers["Cache-Control"] = "no-store"
@@ -937,6 +949,12 @@ def plan_published(request: Request, date: str | None = None):
     plan_date = _require_iso_date_param(date, "date") if date else _business_date(offset_days=0)
     svc = DatabaseService()
     payload = svc.get_plan_payload(plan_date, "published")
+    source = "published_plans"
+    if not payload:
+        payload = svc.build_delivery_plan_payload(plan_date, force_refresh=_wants_refresh(request))
+        source = "deliveries"
+        if not payload.get("deliveries"):
+            return ok_response(request, {"plan_date": plan_date, "plan_type": "published", "published": False})
     if not payload:
         return ok_response(request, {"plan_date": plan_date, "plan_type": "published", "published": False})
     normalized_deliveries = [_normalize_plan_delivery(d) for d in payload.get("deliveries") or []]
@@ -964,6 +982,7 @@ def plan_published(request: Request, date: str | None = None):
             "status": payload.get("status"),
             "updated_at": payload.get("updated_at"),
             "created_at": payload.get("updated_at"),
+            "source": source,
         },
     )
     resp.headers["Cache-Control"] = "no-store"
@@ -991,6 +1010,26 @@ def plan_published_list(request: Request):
                 "created_at": rec.get("createdTime"),
             }
         )
+    if not items:
+        seen_dates: set[str] = set()
+        for delivery in svc.list_deliveries_min(force_refresh=_wants_refresh(request)):
+            scheduled = str(delivery.get("scheduled_date") or "").strip()
+            if not scheduled:
+                continue
+            seen_dates.add(scheduled)
+        for scheduled in sorted(seen_dates, reverse=True):
+            items.append(
+                {
+                    "record_id": scheduled,
+                    "plan_date": scheduled,
+                    "plan_type": "published",
+                    "published_by": None,
+                    "status": "Live",
+                    "updated_at": None,
+                    "created_at": None,
+                    "source": "deliveries",
+                }
+            )
     resp = ok_response(request, {"items": items})
     resp.headers["Cache-Control"] = "no-store"
     return resp

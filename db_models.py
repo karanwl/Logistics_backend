@@ -1,82 +1,91 @@
-from sqlalchemy import Boolean, Column, Date, Float, ForeignKey, Integer, Text
+from sqlalchemy import Boolean, Column, Date, DateTime, Float, ForeignKey, Integer, Text
 from sqlalchemy.orm import relationship
 
 from db import Base
 
 
 class Jobsite(Base):
-    __tablename__ = "Jobsites"
+    __tablename__ = "jobsites"
 
-    job_id = Column("Job ID", Integer, primary_key=True)
-    name = Column("Name", Text, nullable=False)
-    address = Column("Address", Text)
-    latitude = Column("Latitude", Float)
-    longitude = Column("Longitude", Float)
-    site_contact = Column("Site Contact", Text)
-    site_contact_number = Column("Site Contact Number", Text)
+    job_id = Column("id", Integer, primary_key=True)
+    name = Column("name", Text, nullable=False)
+    address = Column("address", Text)
+    latitude = Column("latitude", Float)
+    longitude = Column("longitude", Float)
+    site_contact = Column("site_contact", Text)
+    site_contact_number = Column("site_contact_number", Text)
+    created_at = Column("created_at", DateTime(timezone=True))
+    updated_at = Column("updated_at", DateTime(timezone=True))
 
     deliveries = relationship("Delivery", back_populates="jobsite")
 
 
 class Delivery(Base):
-    __tablename__ = "Deliveries"
+    __tablename__ = "deliveries"
 
-    delivery_id = Column("Delivery ID", Integer, primary_key=True)
-    job_id = Column("Job ID", Integer, ForeignKey("Jobsites.Job ID"))
-    sales_order = Column("Sales Order", Integer)
-    ps_delivered = Column("PS Delivered", Boolean)
-    scheduled_date = Column("Scheduled Date", Date)
-    med_skid = Column("Med Skid", Integer)
-    small_skid = Column("Small Skid", Integer)
-    large_skid = Column("Large Skid", Integer)
-    pickup = Column("Pickup", Boolean)
-    pickup_vehicle = Column("Pickup Vehicle", Text)
-    requires_empty_truck = Column("Requires Empty Truck", Boolean)
-    door = Column("Door", Integer)
-    frame = Column("Frame", Integer)
-    exp_frame = Column("Exp Frame", Integer)
-    box = Column("Box", Integer)
-    drivers = Column("Drivers", Text)
-    status = Column("Status", Text)
-    status_updated_at = Column("Status Updated At", Text)
-    arrived_at = Column("Arrived At", Text)
-    delivered_at = Column("Delivered At", Text)
-    driver_latitude = Column("Driver Latitude", Float)
-    driver_longitude = Column("Driver Longitude", Float)
-    delivery_notes = Column("Delivery Notes", Text)
-    window_start = Column("Window Start", Text)
-    window_end = Column("Window End", Text)
-    packing_slip = Column("Packing Slip", Integer)
+    delivery_id = Column("id", Integer, primary_key=True)
+    job_id = Column("jobsite_id", Integer, ForeignKey("jobsites.id"))
+    sales_order = Column("sales_order", Integer)
+    ps_delivered = Column("ps_delivered", Boolean)
+    scheduled_date = Column("scheduled_date", Date)
+    med_skid = Column("med_skid", Integer)
+    small_skid = Column("small_skid", Integer)
+    large_skid = Column("large_skid", Integer)
+    pickup = Column("pickup", Boolean)
+    pickup_vehicle = Column("pickup_vehicle", Text)
+    requires_empty_truck = Column("requires_empty_truck", Boolean)
+    door = Column("door", Integer)
+    frame = Column("frame", Integer)
+    exp_frame = Column("exp_frame", Integer)
+    box = Column("box", Integer)
+    drivers = Column("driver_name", Text)
+    status = Column("status", Text)
+    status_updated_at = Column("status_updated_at", DateTime(timezone=True))
+    arrived_at = Column("arrived_at", DateTime(timezone=True))
+    delivered_at = Column("delivered_at", DateTime(timezone=True))
+    driver_latitude = Column("driver_latitude", Float)
+    driver_longitude = Column("driver_longitude", Float)
+    delivery_notes = Column("driver_notes", Text)
+    window_start = Column("window_start", Text)
+    window_end = Column("window_end", Text)
+    packing_slip = Column("packing_slip", Integer)
+    route_sequence = Column("route_sequence", Integer)
+    created_at = Column("created_at", DateTime(timezone=True))
+    updated_at = Column("updated_at", DateTime(timezone=True))
 
     jobsite = relationship("Jobsite", back_populates="deliveries")
 
 
 class User(Base):
-    __tablename__ = "Users"
+    __tablename__ = "users"
 
-    email = Column("Email", Text, primary_key=True)
-    password_hash = Column("Password Hash", Text)
-    role = Column("Role", Text)
-    active = Column("Active", Boolean)
-    name = Column("Name", Text)
-    session_token = Column("Session Token", Text)
-    session_expires = Column("Session Expires", Text)
+    email = Column("email", Text, primary_key=True)
+    password_hash = Column("password_hash", Text)
+    role = Column("role", Text)
+    active = Column("active", Boolean)
+    name = Column("name", Text)
+    session_token = Column("session_token", Text)
+    session_expires = Column("session_expires", DateTime(timezone=True))
+    created_at = Column("created_at", DateTime(timezone=True))
+    updated_at = Column("updated_at", DateTime(timezone=True))
 
     published_plans = relationship("PublishedPlan", back_populates="publisher")
 
 
 class PublishedPlan(Base):
-    __tablename__ = "Published Plans"
+    __tablename__ = "published_plans"
 
-    plan_date = Column("Plan Date", Date, primary_key=True)
-    plan_type = Column("Plan Type", Text, primary_key=True)
-    fleet_json = Column("Fleet JSON", Text)
-    routes_json = Column("Routes JSON", Text)
-    deliveries_json = Column("Deliveries JSON", Text)
-    meta_json = Column("Meta JSON", Text)
-    driver_profiles_json = Column("Driver Profiles JSON", Text)
-    status = Column("Status", Text)
-    published_by = Column("Published By", Text, ForeignKey("Users.Email"))
-    published_at = Column("Published At", Text)
+    plan_date = Column("plan_date", Date, primary_key=True)
+    plan_type = Column("plan_type", Text, primary_key=True)
+    fleet_json = Column("fleet_json", Text)
+    routes_json = Column("routes_json", Text)
+    deliveries_json = Column("deliveries_json", Text)
+    meta_json = Column("meta_json", Text)
+    driver_profiles_json = Column("driver_profiles_json", Text)
+    status = Column("status", Text)
+    published_by = Column("published_by", Text, ForeignKey("users.email"))
+    published_at = Column("published_at", DateTime(timezone=True))
+    created_at = Column("created_at", DateTime(timezone=True))
+    updated_at = Column("updated_at", DateTime(timezone=True))
 
     publisher = relationship("User", back_populates="published_plans")

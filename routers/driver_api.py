@@ -216,12 +216,47 @@ def _load_published_plan(svc: DatabaseService, plan_date: str):
     }
 
 
+def _load_delivery_plan(svc: DatabaseService, plan_date: str):
+    try:
+        payload = svc.build_delivery_plan_payload(plan_date, force_refresh=False)
+    except Exception:
+        return None
+    deliveries = payload.get("deliveries") if isinstance(payload, dict) else []
+    if not deliveries:
+        return None
+    return {
+        "record_id": plan_date,
+        "plan_date": payload.get("plan_date") or plan_date,
+        "routes": payload.get("routes") or [],
+        "deliveries": payload.get("deliveries") or [],
+        "meta": payload.get("meta") or {},
+        "fleet": payload.get("fleet") or {},
+        "driver_profiles": payload.get("driver_profiles") or [],
+        "published_by": payload.get("updated_by"),
+        "status": payload.get("status"),
+        "updated_at": payload.get("updated_at"),
+        "created_at": payload.get("updated_at"),
+        "source": "deliveries",
+    }
+
+
+def _load_effective_plan(svc: DatabaseService, plan_date: str):
+    plan = _load_published_plan(svc, plan_date)
+    if plan:
+        plan["source"] = "published_plans"
+        return plan
+    return _load_delivery_plan(svc, plan_date)
+
+
 def _resolve_plan_date(svc: DatabaseService, requested: str | None) -> str:
     if requested:
         return requested
     today = _business_date()
     if svc.get_published_plan(today):
         return today
+    for item in svc.list_deliveries_min(force_refresh=False):
+        if str(item.get("scheduled_date") or "").strip() == today:
+            return today
     return _next_plan_date()
 
 
@@ -669,7 +704,7 @@ def driver_route_today(request: Request, include_all: bool = False):
 
     svc = DatabaseService()
     plan_date = _resolve_plan_date(svc, None)
-    plan = _load_published_plan(svc, plan_date)
+    plan = _load_effective_plan(svc, plan_date)
     if not plan:
         return ok_response(request, {"published": False, "plan_date": plan_date, "routes": [], "deliveries": []})
 
@@ -690,6 +725,7 @@ def driver_route_today(request: Request, include_all: bool = False):
             "routes": routes,
             "deliveries": deliveries,
             "meta": plan.get("meta") or {},
+            "source": plan.get("source") or "published_plans",
         },
     )
     resp.headers["Cache-Control"] = "no-store"
@@ -704,7 +740,7 @@ def driver_route_date(plan_date: str, request: Request, include_all: bool = Fals
 
     svc = DatabaseService()
     plan_date = _require_iso_date_param(plan_date, "plan_date")
-    plan = _load_published_plan(svc, plan_date)
+    plan = _load_effective_plan(svc, plan_date)
     if not plan:
         return ok_response(request, {"published": False, "plan_date": plan_date, "routes": [], "deliveries": []})
 
@@ -725,6 +761,7 @@ def driver_route_date(plan_date: str, request: Request, include_all: bool = Fals
             "routes": routes,
             "deliveries": deliveries,
             "meta": plan.get("meta") or {},
+            "source": plan.get("source") or "published_plans",
         },
     )
     resp.headers["Cache-Control"] = "no-store"
@@ -736,7 +773,7 @@ def driver_route_changes(request: Request, since: str | None = None, date: str |
     user = _require_driver(request)
     svc = DatabaseService()
     plan_date = _require_iso_date_param(date, "date") if date else _resolve_plan_date(svc, date)
-    plan = _load_published_plan(svc, plan_date)
+    plan = _load_effective_plan(svc, plan_date)
     if not plan:
         return ok_response(request, {"published": False, "changed": False, "plan_date": plan_date})
 

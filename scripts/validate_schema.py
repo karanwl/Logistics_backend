@@ -8,62 +8,60 @@ from config import settings
 
 
 EXPECTED_TABLES = {
-    "Deliveries": {
-        "Delivery ID": {"types": {"integer"}},
-        "Job ID": {"types": {"integer"}},
-        "Sales Order": {"types": {"integer"}},
-        "PS Delivered": {"types": {"boolean"}},
-        "Scheduled Date": {"types": {"date"}},
-        "Med Skid": {"types": {"integer"}},
-        "Small Skid": {"types": {"integer"}},
-        "Large Skid": {"types": {"integer"}},
-        "Pickup": {"types": {"boolean"}},
-        "Pickup Vehicle": {"types": {"text", "character varying"}},
-        "Requires Empty Truck": {"types": {"boolean"}},
-        "Door": {"types": {"integer"}},
-        "Frame": {"types": {"integer"}},
-        "Box": {"types": {"integer"}},
-        "Drivers": {"types": {"text", "character varying"}},
-        "Delivery Notes": {"types": {"text", "character varying"}},
-        "Window Start": {"types": {"text", "character varying"}},
-        "Window End": {"types": {"text", "character varying"}},
-        "Packing Slip": {"types": {"integer"}},
+    "users": {
+        "email": {"types": {"text", "character varying"}},
+        "password_hash": {"types": {"text", "character varying"}},
+        "role": {"types": {"text", "character varying"}},
+        "active": {"types": {"boolean"}},
+        "name": {"types": {"text", "character varying"}},
+        "session_token": {"types": {"text", "character varying"}},
+        "session_expires": {"types": {"timestamp with time zone"}},
     },
-    "Jobsites": {
-        "Job ID": {"types": {"integer"}},
-        "Name": {"types": {"text", "character varying"}},
-        "Address": {"types": {"text", "character varying"}},
-        "Latitude": {"types": {"double precision", "real", "numeric"}},
-        "Longitude": {"types": {"double precision", "real", "numeric"}},
-        "Site Contact": {"types": {"text", "character varying"}},
-        "Site Contact Number": {"types": {"text", "character varying"}},
+    "jobsites": {
+        "id": {"types": {"integer"}},
+        "name": {"types": {"text", "character varying"}},
+        "address": {"types": {"text", "character varying"}},
+        "latitude": {"types": {"double precision", "real", "numeric"}},
+        "longitude": {"types": {"double precision", "real", "numeric"}},
+        "site_contact": {"types": {"text", "character varying"}},
+        "site_contact_number": {"types": {"text", "character varying"}},
     },
-    "Published Plans": {
-        "Plan Date": {"types": {"date"}},
-        "Fleet JSON": {"types": {"text", "character varying"}},
-        "Routes JSON": {"types": {"text", "character varying"}},
-        "Deliveries JSON": {"types": {"text", "character varying"}},
-        "Meta JSON": {"types": {"text", "character varying"}},
-        "Driver Profiles JSON": {"types": {"text", "character varying"}},
-        "Status": {"types": {"text", "character varying"}},
-        "Published By": {"types": {"text", "character varying"}},
-        "Published At": {"types": {"text", "character varying"}},
-    },
-    "Users": {
-        "Email": {"types": {"text", "character varying"}},
-        "Password Hash": {"types": {"text", "character varying"}},
-        "Role": {"types": {"text", "character varying"}},
-        "Active": {"types": {"boolean"}},
-        "Name": {"types": {"text", "character varying"}},
-        "Session Token": {"types": {"text", "character varying"}},
-        "Session Expires": {"types": {"text", "character varying"}},
+    "deliveries": {
+        "id": {"types": {"integer"}},
+        "jobsite_id": {"types": {"integer"}},
+        "sales_order": {"types": {"integer"}},
+        "ps_delivered": {"types": {"boolean"}},
+        "scheduled_date": {"types": {"date"}},
+        "med_skid": {"types": {"integer"}},
+        "small_skid": {"types": {"integer"}},
+        "large_skid": {"types": {"integer"}},
+        "pickup": {"types": {"boolean"}},
+        "pickup_vehicle": {"types": {"text", "character varying"}},
+        "requires_empty_truck": {"types": {"boolean"}},
+        "door": {"types": {"integer"}},
+        "frame": {"types": {"integer"}},
+        "exp_frame": {"types": {"integer"}},
+        "box": {"types": {"integer"}},
+        "driver_name": {"types": {"text", "character varying"}},
+        "driver_notes": {"types": {"text", "character varying"}},
+        "window_start": {"types": {"text", "character varying"}},
+        "window_end": {"types": {"text", "character varying"}},
+        "packing_slip": {"types": {"integer"}},
+        "status": {"types": {"text", "character varying"}},
+        "status_updated_at": {"types": {"timestamp with time zone"}},
+        "arrived_at": {"types": {"timestamp with time zone"}},
+        "delivered_at": {"types": {"timestamp with time zone"}},
+        "driver_latitude": {"types": {"double precision", "real", "numeric"}},
+        "driver_longitude": {"types": {"double precision", "real", "numeric"}},
+        "route_sequence": {"types": {"integer"}},
     },
 }
 
 EXPECTED_FKS = {
-    ("Deliveries", "Job ID", "Jobsites", "Job ID"),
-    ("Published Plans", "Published By", "Users", "Email"),
+    ("deliveries", "jobsite_id", "jobsites", "id"),
 }
+
+EXPECTED_VIEWS = {"v_route_live", "v_driver_progress_live"}
 
 
 def main() -> int:
@@ -137,6 +135,20 @@ def main() -> int:
                 issues.append(
                     f"Missing foreign key: {fk[0]}.{fk[1]} -> {fk[2]}.{fk[3]}"
                 )
+
+        view_rows = conn.execute(
+            text(
+                """
+                SELECT table_name
+                FROM information_schema.views
+                WHERE table_schema = 'public'
+                """
+            )
+        ).mappings().all()
+        actual_views = {row["table_name"] for row in view_rows}
+        for view_name in EXPECTED_VIEWS:
+            if view_name not in actual_views:
+                issues.append(f"Missing view: {view_name}")
 
     if issues:
         print("Schema validation failed:")
