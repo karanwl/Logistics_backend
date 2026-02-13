@@ -41,7 +41,14 @@ def login_submit(request: Request, email: str = Form(...), password: str = Form(
         raise HTTPException(status_code=401, detail="Invalid email or password.")
     maybe_upgrade_password(rec.get("id"), password, stored)
 
-    session = issue_session(rec.get("id"))
+    try:
+        session = issue_session(rec.get("id"))
+    except Exception:
+        logger.exception("Login failed while issuing session for user_id=%s", rec.get("id"))
+        raise HTTPException(
+            status_code=503,
+            detail="Login is temporarily unavailable. Verify users table migrations.",
+        )
     resp = ok_response(request, {"ok": True})
     resp.set_cookie(
         settings.AUTH_COOKIE_NAME,

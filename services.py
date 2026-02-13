@@ -15,6 +15,7 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from sqlalchemy import func, inspect, select, text
+from sqlalchemy.exc import SQLAlchemyError
 
 from config import settings
 from db import SessionLocal, engine
@@ -385,6 +386,70 @@ class DatabaseService:
             settings.USERS_SESSION_EXPIRES_FIELD: session_expires,
         }
         return {"id": user.email, "fields": fields}
+
+    def _legacy_user_record(self, row: Dict[str, Any]) -> Dict[str, Any]:
+        raw_email = self._first_str(row.get("Email")).strip()
+        normalized_email = self._normalize_email(raw_email) or raw_email
+        session_expires_value = row.get("Session Expires")
+        if isinstance(session_expires_value, datetime):
+            session_expires = session_expires_value.isoformat()
+        else:
+            session_expires_text = self._first_str(session_expires_value).strip()
+            session_expires = session_expires_text or None
+        fields = {
+            settings.USERS_EMAIL_FIELD: normalized_email,
+            settings.USERS_PASSWORD_FIELD: row.get("Password Hash"),
+            settings.USERS_ROLE_FIELD: row.get("Role"),
+            settings.USERS_ACTIVE_FIELD: self._to_bool(row.get("Active", True)),
+            settings.USERS_NAME_FIELD: row.get("Name"),
+            settings.USERS_SESSION_TOKEN_FIELD: row.get("Session Token"),
+            settings.USERS_SESSION_EXPIRES_FIELD: session_expires,
+        }
+        return {"id": normalized_email, "fields": fields}
+
+    @staticmethod
+    def _users_select_sql() -> str:
+        return """
+            SELECT
+                "Email",
+                "Password Hash",
+                "Role",
+                COALESCE("Active", TRUE) AS "Active",
+                "Name",
+                "Session Token",
+                "Session Expires"
+            FROM "Users"
+        """
+
+    def _query_legacy_user_by_email(self, session, normalized_email: str) -> Dict[str, Any] | None:
+        row = session.execute(
+            text(
+                f"""
+                {self._users_select_sql()}
+                WHERE lower(btrim("Email")) = :email
+                LIMIT 1
+                """
+            ),
+            {"email": normalized_email},
+        ).mappings().first()
+        if not row:
+            return None
+        return self._legacy_user_record(dict(row))
+
+    def _query_legacy_user_by_session_token(self, session, token: str) -> Dict[str, Any] | None:
+        row = session.execute(
+            text(
+                f"""
+                {self._users_select_sql()}
+                WHERE "Session Token" = :token
+                LIMIT 1
+                """
+            ),
+            {"token": token},
+        ).mappings().first()
+        if not row:
+            return None
+        return self._legacy_user_record(dict(row))
 
     @staticmethod
     def _normalize_plan_type(value: str | None, default: str = "published") -> str:
@@ -973,8 +1038,21 @@ class DatabaseService:
                 self._set_cached_table(table_name, data)
                 return data
             if self._is_users_table(table_name):
-                records = session.execute(select(User)).scalars().all()
-                data = [self._user_record(r) for r in records]
+                if self._table_exists("users", session.bind):
+                    records = session.execute(select(User)).scalars().all()
+                    data = [self._user_record(r) for r in records]
+                elif self._table_exists("Users", session.bind):
+                    rows = session.execute(
+                        text(
+                            f"""
+                            {self._users_select_sql()}
+                            ORDER BY "Email"
+                            """
+                        )
+                    ).mappings().all()
+                    data = [self._legacy_user_record(dict(row)) for row in rows]
+                else:
+                    data = []
                 self._set_cached_table(table_name, data)
                 return data
             if self._is_published_plans_table(table_name):
@@ -1917,28 +1995,51 @@ class DatabaseService:
                     )
                 except Exception as e:
                     logger.info("Auth debug DB url unavailable: %s", e)
-            user = session.execute(
-                select(User).where(func.lower(func.trim(User.email)) == normalized)
-            ).scalar_one_or_none()
-            if settings.AUTH_DEBUG:
-                if user:
-                    logger.info("Auth debug DB user row email=%s active=%s", user.email, user.active)
-                else:
-                    logger.info("Auth debug DB user row not found for email=%s", normalized)
-            if not user:
+            try:
+                if self._table_exists("users", session.bind):
+                    user = session.execute(
+                        select(User).where(func.lower(func.trim(User.email)) == normalized)
+                    ).scalar_one_or_none()
+                    if settings.AUTH_DEBUG:
+                        if user:
+                            logger.info("Auth debug DB user row email=%s active=%s", user.email, user.active)
+                        else:
+                            logger.info("Auth debug DB user row not found for email=%s", normalized)
+                    if not user:
+                        return None
+                    return self._user_record(user)
+
+                if self._table_exists("Users", session.bind):
+                    user_record = self._query_legacy_user_by_email(session, normalized)
+                    if settings.AUTH_DEBUG:
+                        logger.info("Auth debug legacy Users lookup found=%s", bool(user_record))
+                    return user_record
+
+                if settings.AUTH_DEBUG:
+                    logger.info("Auth debug users storage not found for email=%s", normalized)
                 return None
-            return self._user_record(user)
+            except SQLAlchemyError:
+                logger.exception("Failed to query user by email.")
+                return None
 
     def get_user_by_session_token(self, token: str) -> Dict[str, Any] | None:
         if not token:
             return None
         with SessionLocal() as session:
-            user = session.execute(
-                select(User).where(User.session_token == token)
-            ).scalar_one_or_none()
-            if not user:
+            try:
+                if self._table_exists("users", session.bind):
+                    user = session.execute(
+                        select(User).where(User.session_token == token)
+                    ).scalar_one_or_none()
+                    if not user:
+                        return None
+                    return self._user_record(user)
+                if self._table_exists("Users", session.bind):
+                    return self._query_legacy_user_by_session_token(session, token)
                 return None
-            return self._user_record(user)
+            except SQLAlchemyError:
+                logger.exception("Failed to query user by session token.")
+                return None
 
     def list_users_min(self, role: str | None = None, active_only: bool = True, force_refresh: bool = False) -> List[Dict[str, Any]]:
         records = self.list_records(settings.USERS_TABLE, force_refresh=force_refresh)
@@ -1970,11 +2071,40 @@ class DatabaseService:
         return self.create_record(settings.USERS_TABLE, fields)
 
     def update_user_session(self, record_id: str, token: str | None, expires_iso: str | None):
-        fields = {
-            settings.USERS_SESSION_TOKEN_FIELD: token,
-            settings.USERS_SESSION_EXPIRES_FIELD: expires_iso,
-        }
-        result = self.update_record(settings.USERS_TABLE, record_id, fields)
+        normalized = self._normalize_email(record_id)
+        if not normalized:
+            raise ValueError("Invalid user record id.")
+        expires_dt = self._coerce_datetime(expires_iso)
+        with SessionLocal() as session:
+            if self._table_exists("users", session.bind):
+                user = session.get(User, normalized)
+                if not user:
+                    raise ValueError("Record not found.")
+                user.session_token = token
+                user.session_expires = expires_dt
+                if hasattr(user, "updated_at"):
+                    user.updated_at = datetime.now(ZoneInfo("UTC"))
+                session.commit()
+                session.refresh(user)
+                result = self._user_record(user)
+            elif self._table_exists("Users", session.bind):
+                update_result = session.execute(
+                    text(
+                        """
+                        UPDATE "Users"
+                        SET "Session Token" = :token,
+                            "Session Expires" = :expires
+                        WHERE lower(btrim("Email")) = :email
+                        """
+                    ),
+                    {"token": token, "expires": expires_iso, "email": normalized},
+                )
+                if (update_result.rowcount or 0) <= 0:
+                    raise ValueError("Record not found.")
+                session.commit()
+                result = self._query_legacy_user_by_email(session, normalized)
+            else:
+                raise ValueError("Users storage is not configured.")
         self._invalidate_cache(settings.USERS_TABLE)
         return result
 
