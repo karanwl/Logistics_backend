@@ -49,6 +49,10 @@ def _cache_evict(token: str) -> None:
         _AUTH_CACHE.pop(token, None)
 
 
+def invalidate_cached_token(token: str) -> None:
+    _cache_evict(token)
+
+
 def _b64encode(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).decode("utf-8").rstrip("=")
 

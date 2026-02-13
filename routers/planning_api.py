@@ -17,6 +17,7 @@ import threading
 
 from auth import get_current_user, hash_password
 from planning import generate_tomorrow_plan, recalculate_tomorrow_plan
+from push_notifications import send_push_notification, tokens_for_identities
 from services import DatabaseService, MapboxService
 from config import settings
 from security import csrf_protect
@@ -477,6 +478,23 @@ def _normalize_route_driver_profiles(
     return normalized_routes, normalized_driver_profiles
 
 
+def _driver_identities_from_routes(routes: list[dict]) -> list[str]:
+    identities: set[str] = set()
+    for route in routes or []:
+        if not isinstance(route, dict):
+            continue
+        profile = route.get("driver_profile")
+        if isinstance(profile, dict):
+            for key in ("id", "email", "name"):
+                value = profile.get(key)
+                if value is not None and str(value).strip():
+                    identities.add(str(value).strip())
+        driver = route.get("driver")
+        if driver is not None and str(driver).strip():
+            identities.add(str(driver).strip())
+    return sorted(identities)
+
+
 @router.post("/plan/publish")
 def plan_publish(payload: PublishPlanRequest, request: Request):
     user = get_current_user(request)
@@ -531,6 +549,19 @@ def plan_publish(payload: PublishPlanRequest, request: Request):
         )
         resp.headers["Cache-Control"] = "no-store"
         return resp
+
+    try:
+        identities = _driver_identities_from_routes(normalized_routes)
+        tokens = tokens_for_identities(identities)
+        send_push_notification(
+            tokens=tokens,
+            title="Route Updated",
+            body=f"Your route for {plan_date} has been published.",
+            data={"kind": "route_update", "plan_date": plan_date},
+        )
+    except Exception:
+        logger.warning("Route publish push notification failed", exc_info=True)
+
     resp = ok_response(
         request,
         {

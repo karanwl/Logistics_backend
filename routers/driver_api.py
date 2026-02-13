@@ -8,8 +8,16 @@ from fastapi import APIRouter, HTTPException, UploadFile, File
 from pydantic import BaseModel, Field
 from starlette.requests import Request
 
-from auth import clear_session, issue_session, verify_password, get_user_from_token, maybe_upgrade_password
+from auth import (
+    clear_session,
+    issue_session,
+    verify_password,
+    get_user_from_token,
+    maybe_upgrade_password,
+    invalidate_cached_token,
+)
 from config import settings
+from push_notifications import register_push_token, unregister_push_token, send_push_notification, tokens_for_identities
 from responses import ok_response
 from services import DatabaseService
 from utils import business_date_iso, next_plan_date_iso, parse_iso_date
@@ -362,6 +370,20 @@ class DriverStatusUpdate(BaseModel):
     location: DriverLocation | None = None
 
 
+class PushRegisterRequest(BaseModel):
+    token: str
+    platform: str | None = None
+
+
+class PushUnregisterRequest(BaseModel):
+    token: str | None = None
+
+
+class PushTestRequest(BaseModel):
+    title: str | None = None
+    body: str | None = None
+
+
 class DeliveryDetailResponse(BaseModel):
     delivery_id: str
     job_id: str | None = None
@@ -445,6 +467,112 @@ def driver_logout(request: Request):
     user = _require_driver(request)
     clear_session(user.get("record_id"))
     return ok_response(request, {"ok": True})
+
+
+@router.post("/auth/refresh")
+def driver_refresh_session(request: Request):
+    old_token = _get_bearer_token(request)
+    user = _require_driver(request)
+    if not user.get("record_id"):
+        raise HTTPException(status_code=401, detail="Authentication required.")
+
+    session = issue_session(user.get("record_id"))
+    if old_token:
+        invalidate_cached_token(old_token)
+
+    payload = {
+        "ok": True,
+        "token": session["token"],
+        "token_type": "Bearer",
+        "expires": session["expires"].isoformat(),
+        "user": {
+            "id": user.get("record_id"),
+            "email": user.get("email"),
+            "name": user.get("name") or user.get("display_name"),
+            "role": user.get("role"),
+        },
+    }
+    resp = ok_response(request, payload)
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@router.post("/push/register")
+def driver_push_register(payload: PushRegisterRequest, request: Request):
+    user = _require_driver(request)
+    token = str(payload.token or "").strip()
+    if not token:
+        raise HTTPException(status_code=400, detail="Push token is required.")
+
+    identities = {
+        user.get("record_id"),
+        user.get("email"),
+        user.get("name"),
+        user.get("display_name"),
+    }
+    count = 0
+    for identity in identities:
+        count = max(count, register_push_token(identity, token))
+
+    resp = ok_response(
+        request,
+        {
+            "ok": True,
+            "registered": True,
+            "device_count": count,
+            "platform": (payload.platform or "").strip().lower() or None,
+        },
+    )
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@router.post("/push/unregister")
+def driver_push_unregister(payload: PushUnregisterRequest, request: Request):
+    user = _require_driver(request)
+    identities = {
+        user.get("record_id"),
+        user.get("email"),
+        user.get("name"),
+        user.get("display_name"),
+    }
+    remaining = 0
+    for identity in identities:
+        remaining = max(remaining, unregister_push_token(identity, payload.token))
+
+    resp = ok_response(
+        request,
+        {
+            "ok": True,
+            "registered": remaining > 0,
+            "device_count": remaining,
+        },
+    )
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@router.post("/push/test")
+def driver_push_test(payload: PushTestRequest, request: Request):
+    user = _require_driver(request)
+    identities = [user.get("record_id"), user.get("email"), user.get("name"), user.get("display_name")]
+    tokens = tokens_for_identities(identities)
+    result = send_push_notification(
+        tokens=tokens,
+        title=(payload.title or "Citywide Logistics").strip() or "Citywide Logistics",
+        body=(payload.body or "Test push from server").strip() or "Test push from server",
+        data={"kind": "test"},
+    )
+    resp = ok_response(
+        request,
+        {
+            "ok": bool(result.get("ok")),
+            "tokens": len(tokens),
+            "result": result,
+        },
+    )
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
 
 
 @router.get("/route/today")

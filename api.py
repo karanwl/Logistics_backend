@@ -1,5 +1,7 @@
 import logging
 import os
+import time
+import uuid
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
@@ -85,10 +87,24 @@ async def csrf_cookie_middleware(request, call_next):
 
 @app.middleware("http")
 async def security_headers_middleware(request, call_next):
+    request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+    request.state.request_id = request_id
+    start = time.perf_counter()
     response = await call_next(request)
+    elapsed_ms = int((time.perf_counter() - start) * 1000)
+    response.headers["X-Request-ID"] = request_id
+    response.headers["X-Response-Time-Ms"] = str(elapsed_ms)
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "SAMEORIGIN"
     response.headers["Referrer-Policy"] = "same-origin"
+    logger.info(
+        "request_id=%s method=%s path=%s status=%s elapsed_ms=%s",
+        request_id,
+        request.method,
+        request.url.path,
+        response.status_code,
+        elapsed_ms,
+    )
     return response
 
 # Uploads (driver photo proof)
