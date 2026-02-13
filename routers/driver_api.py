@@ -352,6 +352,92 @@ def _filter_plan_for_driver(
     return fallback_routes, delivery_fallback
 
 
+def _delivery_business_id(delivery: dict) -> str:
+    if not isinstance(delivery, dict):
+        return ""
+    for key in ("id", "delivery_id", "Delivery ID"):
+        value = delivery.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text and text.lower() != "null":
+            return text
+    return ""
+
+
+def _truthy(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    if isinstance(value, (int, float)):
+        return value != 0
+    text = str(value).strip().lower()
+    return text in {"1", "true", "yes", "y", "checked"}
+
+
+def _overlay_live_delivery_progress(deliveries: list[dict], svc: DatabaseService) -> list[dict]:
+    if not deliveries:
+        return []
+
+    wanted_ids = {_delivery_business_id(item) for item in deliveries if isinstance(item, dict)}
+    wanted_ids.discard("")
+    if not wanted_ids:
+        return [dict(item) if isinstance(item, dict) else item for item in deliveries]
+
+    live_by_id: dict[str, dict] = {}
+    for row in svc.list_deliveries_min(force_refresh=False):
+        key = str(row.get("delivery_id") or "").strip()
+        if not key or key not in wanted_ids:
+            continue
+        live_by_id[key] = row
+        if len(live_by_id) >= len(wanted_ids):
+            break
+
+    merged: list[dict] = []
+    for item in deliveries:
+        if not isinstance(item, dict):
+            merged.append(item)
+            continue
+        out = dict(item)
+        delivery_id = _delivery_business_id(out)
+        live = live_by_id.get(delivery_id)
+        if live:
+            status = str(live.get("status") or "").strip()
+            status_updated_at = str(live.get("status_updated_at") or "").strip()
+            arrived_at = str(live.get("arrived_at") or "").strip()
+            delivered_at = str(live.get("delivered_at") or "").strip()
+            driver_notes = str(live.get("driver_notes") or "").strip()
+            driver_name = str(live.get("driver") or "").strip()
+            ps_delivered = _truthy(live.get("ps_delivered"))
+
+            if status:
+                out["status"] = status
+                out["Status"] = status
+            if status_updated_at:
+                out["status_updated_at"] = status_updated_at
+                out["Status Updated At"] = status_updated_at
+            if arrived_at:
+                out["arrived_at"] = arrived_at
+                out["Arrived At"] = arrived_at
+            if delivered_at:
+                out["delivered_at"] = delivered_at
+                out["Delivered At"] = delivered_at
+            if driver_notes:
+                out["driver_notes"] = driver_notes
+                out[settings.DELIVERIES_DRIVER_NOTES_FIELD] = driver_notes
+            if driver_name:
+                out["driver"] = driver_name
+                out["assigned_driver"] = driver_name
+                out[settings.DELIVERIES_DRIVER_FIELD] = driver_name
+            out["ps_delivered"] = ps_delivered
+            out[settings.DELIVERIES_PS_DELIVERED_FIELD] = ps_delivered
+
+        merged.append(out)
+
+    return merged
+
+
 class DriverLoginRequest(BaseModel):
     email: str
     password: str
@@ -593,6 +679,7 @@ def driver_route_today(request: Request, include_all: bool = False):
         user,
         include_all,
     )
+    deliveries = _overlay_live_delivery_progress(deliveries, svc)
 
     resp = ok_response(
         request,
@@ -627,6 +714,7 @@ def driver_route_date(plan_date: str, request: Request, include_all: bool = Fals
         user,
         include_all,
     )
+    deliveries = _overlay_live_delivery_progress(deliveries, svc)
 
     resp = ok_response(
         request,
