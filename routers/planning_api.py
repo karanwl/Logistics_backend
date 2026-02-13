@@ -406,7 +406,16 @@ def _driver_profile_from_assignment(assignment: Any, lookup: Dict[str, Dict[str,
 
 
 def _route_vehicle_key(route: Dict[str, Any]) -> str:
-    return _text_or_empty(route.get("vehicle_id") or route.get("v_id") or route.get("vehicleId") or route.get("id"))
+    for key in ("vehicle_id", "v_id", "vehicleId", "id"):
+        if key not in route:
+            continue
+        value = route.get(key)
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        return _text_or_empty(value)
+    return ""
 
 
 def _normalize_route_driver_profiles(
