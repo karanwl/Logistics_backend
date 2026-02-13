@@ -136,18 +136,25 @@ def _route_driver_name(route: dict) -> str:
         return profile
     if isinstance(profile, dict):
         return profile.get("name", "")
+    driver = route.get("driver")
+    if isinstance(driver, str):
+        return driver
     return ""
+
+
+def _driver_identity_candidates(user: dict) -> set[str]:
+    return {
+        _normalize_name(user.get("display_name")),
+        _normalize_name(user.get("name")),
+        _normalize_name(user.get("email")),
+    }
 
 
 def _route_matches_driver(route: dict, user: dict) -> bool:
     route_name = _normalize_name(_route_driver_name(route))
     if not route_name:
         return False
-    candidates = {
-        _normalize_name(user.get("display_name")),
-        _normalize_name(user.get("name")),
-        _normalize_name(user.get("email")),
-    }
+    candidates = _driver_identity_candidates(user)
     return route_name in candidates
 
 
@@ -179,6 +186,75 @@ def _filter_routes_for_driver(routes: list[dict], user: dict, include_all: bool)
     if include_all:
         return routes
     return [r for r in routes or [] if _route_matches_driver(r, user)]
+
+
+def _delivery_assigned_driver(delivery: dict) -> str:
+    for key in ("driver", "Driver", "driver_name", "Driver Name", "assigned_driver"):
+        val = delivery.get(key)
+        if val is not None and str(val).strip():
+            return str(val)
+    return ""
+
+
+def _delivery_matches_driver(delivery: dict, user: dict) -> bool:
+    assigned = _normalize_name(_delivery_assigned_driver(delivery))
+    if not assigned:
+        return False
+    return assigned in _driver_identity_candidates(user)
+
+
+def _route_has_driver_assignment(route: dict) -> bool:
+    return bool(_normalize_name(_route_driver_name(route)))
+
+
+def _filter_routes_by_delivery_ids(routes: list[dict], delivery_ids: set[str]) -> list[dict]:
+    if not delivery_ids:
+        return []
+    matched: list[dict] = []
+    for route in routes or []:
+        route_ids = _extract_delivery_ids([route])
+        if route_ids.intersection(delivery_ids):
+            matched.append(route)
+    return matched
+
+
+def _filter_plan_for_driver(
+    routes: list[dict],
+    deliveries: list[dict],
+    user: dict,
+    include_all: bool,
+) -> tuple[list[dict], list[dict]]:
+    all_routes = routes or []
+    all_deliveries = [d for d in (deliveries or []) if isinstance(d, dict)]
+
+    if include_all:
+        all_ids = _extract_delivery_ids(all_routes)
+        if not all_ids:
+            return all_routes, all_deliveries
+        filtered = [d for d in all_deliveries if str(d.get("id") or "").strip() in all_ids]
+        return all_routes, filtered
+
+    matched_routes = _filter_routes_for_driver(all_routes, user, include_all=False)
+    matched_ids = _extract_delivery_ids(matched_routes)
+    matched_deliveries = [
+        d for d in all_deliveries
+        if str(d.get("id") or "").strip() in matched_ids
+    ]
+    if matched_routes or matched_deliveries:
+        return matched_routes, matched_deliveries
+
+    has_route_assignments = any(_route_has_driver_assignment(route) for route in all_routes)
+    if has_route_assignments:
+        return matched_routes, matched_deliveries
+
+    # Fallback for legacy/unassigned published routes: use delivery-level driver field.
+    delivery_fallback = [d for d in all_deliveries if _delivery_matches_driver(d, user)]
+    if not delivery_fallback:
+        return matched_routes, matched_deliveries
+
+    fallback_ids = {str(d.get("id") or "").strip() for d in delivery_fallback if str(d.get("id") or "").strip()}
+    fallback_routes = _filter_routes_by_delivery_ids(all_routes, fallback_ids)
+    return fallback_routes, delivery_fallback
 
 
 class DriverLoginRequest(BaseModel):
@@ -266,12 +342,12 @@ def driver_route_today(request: Request, include_all: bool = False):
     if not plan:
         return ok_response(request, {"published": False, "plan_date": plan_date, "routes": [], "deliveries": []})
 
-    routes = _filter_routes_for_driver(plan.get("routes", []), user, include_all)
-    delivery_ids = _extract_delivery_ids(routes)
-    deliveries = [
-        d for d in plan.get("deliveries", [])
-        if str(d.get("id") or "").strip() in delivery_ids
-    ]
+    routes, deliveries = _filter_plan_for_driver(
+        plan.get("routes", []),
+        plan.get("deliveries", []),
+        user,
+        include_all,
+    )
 
     resp = ok_response(
         request,
@@ -300,12 +376,12 @@ def driver_route_date(plan_date: str, request: Request, include_all: bool = Fals
     if not plan:
         return ok_response(request, {"published": False, "plan_date": plan_date, "routes": [], "deliveries": []})
 
-    routes = _filter_routes_for_driver(plan.get("routes", []), user, include_all)
-    delivery_ids = _extract_delivery_ids(routes)
-    deliveries = [
-        d for d in plan.get("deliveries", [])
-        if str(d.get("id") or "").strip() in delivery_ids
-    ]
+    routes, deliveries = _filter_plan_for_driver(
+        plan.get("routes", []),
+        plan.get("deliveries", []),
+        user,
+        include_all,
+    )
 
     resp = ok_response(
         request,

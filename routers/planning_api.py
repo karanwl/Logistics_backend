@@ -319,6 +319,155 @@ def _normalize_plan_delivery(item: Any) -> Dict[str, Any]:
     return d
 
 
+def _text_or_empty(value: Any) -> str:
+    if value in (None, ""):
+        return ""
+    return str(value).strip()
+
+
+def _normalize_driver_profile_item(item: Any) -> Dict[str, Any]:
+    if not isinstance(item, dict):
+        return {}
+    profile: Dict[str, Any] = {}
+    profile_id = _text_or_empty(item.get("id") or item.get("record_id") or item.get("user_id"))
+    email = _text_or_empty(item.get("email"))
+    name = _text_or_empty(item.get("name") or item.get("display_name"))
+    role = _text_or_empty(item.get("role"))
+    if profile_id:
+        profile["id"] = profile_id
+    if email:
+        profile["email"] = email
+    if name:
+        profile["name"] = name
+    if role:
+        profile["role"] = role
+    return profile
+
+
+def _driver_profile_candidates(profile: Dict[str, Any]) -> set[str]:
+    return {
+        _text_or_empty(profile.get("id")).lower(),
+        _text_or_empty(profile.get("email")).lower(),
+        _text_or_empty(profile.get("name")).lower(),
+    } - {""}
+
+
+def _build_driver_profile_lookup(payload_profiles: list[dict], svc: DatabaseService) -> Dict[str, Dict[str, Any]]:
+    lookup: Dict[str, Dict[str, Any]] = {}
+
+    def _register(profile_like: Any):
+        normalized = _normalize_driver_profile_item(profile_like)
+        if not normalized:
+            return
+        for key in _driver_profile_candidates(normalized):
+            lookup[key] = normalized
+
+    for item in payload_profiles or []:
+        _register(item)
+
+    try:
+        drivers = svc.list_users_min(role=settings.DRIVERS_ROLE_VALUE, active_only=False, force_refresh=False)
+    except Exception:
+        drivers = []
+    for rec in drivers or []:
+        _register(
+            {
+                "id": rec.get("record_id") or rec.get("id"),
+                "email": rec.get("email"),
+                "name": rec.get("name") or rec.get("display_name"),
+                "role": rec.get("role"),
+            }
+        )
+    return lookup
+
+
+def _driver_profile_from_assignment(assignment: Any, lookup: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+    if isinstance(assignment, dict):
+        normalized = _normalize_driver_profile_item(assignment)
+        if normalized:
+            for key in _driver_profile_candidates(normalized):
+                match = lookup.get(key)
+                if match:
+                    return dict(match)
+            return normalized
+        assignment = assignment.get("value") or assignment.get("name") or assignment.get("email") or assignment.get("id")
+
+    raw = _text_or_empty(assignment)
+    if not raw:
+        return {}
+
+    key = raw.lower()
+    if key in lookup:
+        return dict(lookup[key])
+
+    if "@" in raw:
+        return {"email": raw, "name": raw}
+    return {"name": raw}
+
+
+def _route_vehicle_key(route: Dict[str, Any]) -> str:
+    return _text_or_empty(route.get("vehicle_id") or route.get("v_id") or route.get("vehicleId") or route.get("id"))
+
+
+def _normalize_route_driver_profiles(
+    routes: list[dict],
+    meta: dict | None,
+    driver_profiles: list[dict] | None,
+    svc: DatabaseService,
+) -> tuple[list[dict], list[dict]]:
+    assignments_raw = (meta or {}).get("driver_assignments") if isinstance(meta, dict) else {}
+    assignments: Dict[str, Any] = {}
+    if isinstance(assignments_raw, dict):
+        for key, value in assignments_raw.items():
+            route_key = _text_or_empty(key)
+            if route_key:
+                assignments[route_key] = value
+
+    lookup = _build_driver_profile_lookup(driver_profiles or [], svc)
+    collected: Dict[tuple[str, str, str], Dict[str, Any]] = {}
+
+    def _collect(profile_like: Any):
+        normalized = _normalize_driver_profile_item(profile_like)
+        if not normalized:
+            return
+        signature = (
+            _text_or_empty(normalized.get("id")),
+            _text_or_empty(normalized.get("email")),
+            _text_or_empty(normalized.get("name")),
+        )
+        collected[signature] = normalized
+
+    normalized_routes: list[dict] = []
+    for route in routes or []:
+        if not isinstance(route, dict):
+            continue
+        item = dict(route)
+
+        resolved_profile: Dict[str, Any] = {}
+        if isinstance(item.get("driver_profile"), dict):
+            resolved_profile = _normalize_driver_profile_item(item.get("driver_profile"))
+        elif isinstance(item.get("driver_profile"), str):
+            resolved_profile = _driver_profile_from_assignment(item.get("driver_profile"), lookup)
+
+        if not resolved_profile:
+            assigned = assignments.get(_route_vehicle_key(item))
+            resolved_profile = _driver_profile_from_assignment(assigned, lookup)
+
+        if resolved_profile:
+            item["driver_profile"] = resolved_profile
+            if not _text_or_empty(item.get("driver")):
+                item["driver"] = resolved_profile.get("name") or resolved_profile.get("email") or ""
+            _collect(resolved_profile)
+
+        normalized_routes.append(item)
+
+    for profile in driver_profiles or []:
+        _collect(profile)
+
+    normalized_driver_profiles = list(collected.values())
+    return normalized_routes, normalized_driver_profiles
+
+
 @router.post("/plan/publish")
 def plan_publish(payload: PublishPlanRequest, request: Request):
     user = get_current_user(request)
@@ -328,6 +477,13 @@ def plan_publish(payload: PublishPlanRequest, request: Request):
     plan_date = payload.plan_date or _next_plan_date()
 
     svc = DatabaseService()
+    normalized_routes, normalized_driver_profiles = _normalize_route_driver_profiles(
+        routes=payload.routes or [],
+        meta=payload.meta or {},
+        driver_profiles=payload.driver_profiles or [],
+        svc=svc,
+    )
+
     def _set_field(out, field_name, value):
         if not field_name:
             return
@@ -336,10 +492,10 @@ def plan_publish(payload: PublishPlanRequest, request: Request):
     fields = {}
     _set_field(fields, settings.PUBLISHED_PLANS_DATE_FIELD, plan_date)
     _set_field(fields, settings.PUBLISHED_PLANS_FLEET_FIELD, DatabaseService._json_dumps(payload.fleet or {}))
-    _set_field(fields, settings.PUBLISHED_PLANS_ROUTES_FIELD, DatabaseService._json_dumps(payload.routes or []))
+    _set_field(fields, settings.PUBLISHED_PLANS_ROUTES_FIELD, DatabaseService._json_dumps(normalized_routes))
     _set_field(fields, settings.PUBLISHED_PLANS_DELIVERIES_FIELD, DatabaseService._json_dumps(payload.deliveries or []))
     _set_field(fields, settings.PUBLISHED_PLANS_META_FIELD, DatabaseService._json_dumps(payload.meta or {}))
-    _set_field(fields, settings.PUBLISHED_PLANS_DRIVER_PROFILES_FIELD, DatabaseService._json_dumps(payload.driver_profiles or []))
+    _set_field(fields, settings.PUBLISHED_PLANS_DRIVER_PROFILES_FIELD, DatabaseService._json_dumps(normalized_driver_profiles))
     _set_field(fields, settings.PUBLISHED_PLANS_UPDATED_AT_FIELD, datetime.now(ZoneInfo("UTC")).isoformat())
     _set_field(fields, settings.PUBLISHED_PLANS_STATUS_FIELD, "Published")
     _set_field(fields, settings.PUBLISHED_PLANS_PUBLISHED_BY_FIELD, user.get("email") or user.get("name") or "manager/admin")
