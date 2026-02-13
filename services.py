@@ -236,6 +236,12 @@ class DatabaseService:
             ),
             "Requires Empty Truck": bool(delivery.requires_empty_truck) if delivery.requires_empty_truck is not None else False,
             settings.DELIVERIES_DRIVER_FIELD: delivery.drivers,
+            settings.DELIVERIES_STATUS_FIELD: getattr(delivery, "status", None),
+            settings.DELIVERIES_STATUS_UPDATED_FIELD: getattr(delivery, "status_updated_at", None),
+            settings.DELIVERIES_ARRIVED_AT_FIELD: getattr(delivery, "arrived_at", None),
+            settings.DELIVERIES_DELIVERED_AT_FIELD: getattr(delivery, "delivered_at", None),
+            settings.DELIVERIES_DRIVER_LAT_FIELD: getattr(delivery, "driver_latitude", None),
+            settings.DELIVERIES_DRIVER_LON_FIELD: getattr(delivery, "driver_longitude", None),
             settings.DELIVERIES_DRIVER_NOTES_FIELD: delivery.delivery_notes,
             "Window Start": delivery.window_start,
             "Window End": delivery.window_end,
@@ -546,6 +552,18 @@ class DatabaseService:
                 delivery.box = self._coerce_int(value)
             elif key == settings.DELIVERIES_DRIVER_FIELD:
                 delivery.drivers = self._first_str(value) if value is not None else None
+            elif key == settings.DELIVERIES_STATUS_FIELD or key == "Status":
+                delivery.status = self._first_str(value) if value not in (None, "") else None
+            elif key == settings.DELIVERIES_STATUS_UPDATED_FIELD or key == "Status Updated At":
+                delivery.status_updated_at = self._first_str(value) if value not in (None, "") else None
+            elif key == settings.DELIVERIES_ARRIVED_AT_FIELD or key == "Arrived At":
+                delivery.arrived_at = self._first_str(value) if value not in (None, "") else None
+            elif key == settings.DELIVERIES_DELIVERED_AT_FIELD or key == "Delivered At":
+                delivery.delivered_at = self._first_str(value) if value not in (None, "") else None
+            elif key == settings.DELIVERIES_DRIVER_LAT_FIELD or key == "Driver Latitude":
+                delivery.driver_latitude = self._coerce_float(value)
+            elif key == settings.DELIVERIES_DRIVER_LON_FIELD or key == "Driver Longitude":
+                delivery.driver_longitude = self._coerce_float(value)
             elif key == settings.DELIVERIES_DRIVER_NOTES_FIELD:
                 delivery.delivery_notes = self._first_str(value) if value is not None else None
             elif key == "Window Start":
@@ -1005,6 +1023,17 @@ class DatabaseService:
             sales_order = self._first_str(fields.get(settings.DELIVERIES_SALES_ORDER_FIELD))
             packing_slip = self._first_str(fields.get(settings.DELIVERIES_PACKING_SLIP_FIELD))
             driver = self._first_str(fields.get(settings.DELIVERIES_DRIVER_FIELD))
+            status = self._first_str(fields.get(settings.DELIVERIES_STATUS_FIELD) or fields.get("Status"))
+            status_updated_at = self._first_str(fields.get(settings.DELIVERIES_STATUS_UPDATED_FIELD))
+            arrived_at = self._first_str(fields.get(settings.DELIVERIES_ARRIVED_AT_FIELD))
+            delivered_at = self._first_str(fields.get(settings.DELIVERIES_DELIVERED_AT_FIELD))
+            driver_lat = self._coerce_float(fields.get(settings.DELIVERIES_DRIVER_LAT_FIELD))
+            driver_lon = self._coerce_float(fields.get(settings.DELIVERIES_DRIVER_LON_FIELD))
+            driver_notes = self._first_str(fields.get(settings.DELIVERIES_DRIVER_NOTES_FIELD))
+            if not status and driver_notes.lower().startswith("[status:"):
+                closing = driver_notes.find("]")
+                if closing > 8:
+                    status = driver_notes[8:closing].strip().lower().replace("-", "_").replace(" ", "_")
             ps_delivered = self._to_bool(fields.get(settings.DELIVERIES_PS_DELIVERED_FIELD))
             pickup_flag = self._to_bool(fields.get("Pickup"))
             pickup_vehicle = self._normalize_pickup_vehicle(fields.get(settings.DELIVERIES_PICKUP_VEHICLE_FIELD))
@@ -1022,6 +1051,13 @@ class DatabaseService:
                 "sales_order": sales_order,
                 "packing_slip": packing_slip,
                 "driver": driver,
+                "status": status,
+                "status_updated_at": status_updated_at,
+                "arrived_at": arrived_at,
+                "delivered_at": delivered_at,
+                "driver_lat": driver_lat,
+                "driver_lon": driver_lon,
+                "driver_notes": driver_notes,
                 "ps_delivered": ps_delivered,
                 "scheduled_date": self._first_str(fields.get("Scheduled Date")),
                 "med_skid": self._first_str(fields.get("Med Skid") or fields.get("Skid")),
