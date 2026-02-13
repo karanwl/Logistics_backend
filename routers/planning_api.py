@@ -504,6 +504,8 @@ def plan_publish(payload: PublishPlanRequest, request: Request):
     plan_date = payload.plan_date or _next_plan_date()
 
     svc = DatabaseService()
+    existing_plan = svc.get_plan_payload(plan_date, "published")
+    is_update = existing_plan is not None
     normalized_routes, normalized_driver_profiles = _normalize_route_driver_profiles(
         routes=payload.routes or [],
         meta=payload.meta or {},
@@ -556,8 +558,16 @@ def plan_publish(payload: PublishPlanRequest, request: Request):
         send_push_notification(
             tokens=tokens,
             title="Route Updated",
-            body=f"Your route for {plan_date} has been published.",
-            data={"kind": "route_update", "plan_date": plan_date},
+            body=(
+                f"Your route for {plan_date} has been updated."
+                if is_update
+                else f"Your route for {plan_date} has been published."
+            ),
+            data={
+                "kind": "route_update",
+                "plan_date": plan_date,
+                "action": "updated" if is_update else "published",
+            },
         )
     except Exception:
         logger.warning("Route publish push notification failed", exc_info=True)
