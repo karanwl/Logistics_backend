@@ -1458,7 +1458,7 @@ class DatabaseService:
     def _route_driver_name_from_payload(route: Dict[str, Any]) -> str:
         profile = route.get("driver_profile")
         if isinstance(profile, dict):
-            for key in ("name", "email", "id"):
+            for key in ("id", "email", "name"):
                 value = str(profile.get(key) or "").strip()
                 if value:
                     return value
@@ -1467,6 +1467,74 @@ class DatabaseService:
             if value:
                 return value
         return str(route.get("driver") or "").strip()
+
+    def _resolve_driver_user_id(
+        self,
+        session,
+        driver_ref: Any,
+        users_cols: set[str] | None = None,
+    ) -> int | None:
+        raw = self._first_str(driver_ref)
+        if not raw:
+            return None
+
+        try:
+            return int(float(raw))
+        except (TypeError, ValueError):
+            pass
+
+        if not self._table_exists("users", session.bind):
+            return None
+
+        cols = users_cols if users_cols is not None else self._users_column_names(session.bind)
+        if "user_id" not in cols:
+            return None
+
+        normalized = raw.strip().lower()
+
+        if "email" in cols:
+            row = session.execute(
+                text(
+                    """
+                    SELECT user_id
+                    FROM users
+                    WHERE lower(trim(email)) = :value
+                    LIMIT 1
+                    """
+                ),
+                {"value": normalized},
+            ).mappings().first()
+            if row and row.get("user_id") is not None:
+                try:
+                    return int(row.get("user_id"))
+                except (TypeError, ValueError):
+                    pass
+
+        name_predicates: List[str] = []
+        if "name" in cols:
+            name_predicates.append("lower(trim(name)) = :value")
+        if "full_name" in cols:
+            name_predicates.append("lower(trim(full_name)) = :value")
+        if name_predicates:
+            row = session.execute(
+                text(
+                    f"""
+                    SELECT user_id
+                    FROM users
+                    WHERE {' OR '.join(name_predicates)}
+                    ORDER BY user_id
+                    LIMIT 1
+                    """
+                ),
+                {"value": normalized},
+            ).mappings().first()
+            if row and row.get("user_id") is not None:
+                try:
+                    return int(row.get("user_id"))
+                except (TypeError, ValueError):
+                    pass
+
+        return None
 
     @staticmethod
     def _route_delivery_assignments(route: Dict[str, Any]) -> List[tuple[str, int]]:
@@ -1712,20 +1780,47 @@ class DatabaseService:
 
         touched = 0
         assigned = 0
+        unresolved_driver_refs: set[str] = set()
         with SessionLocal() as session:
             deliveries = session.execute(
                 select(Delivery).where(Delivery.scheduled_date == target_date)
             ).scalars().all()
+            users_cols = self._users_column_names(session.bind) if self._table_exists("users", session.bind) else set()
+            driver_id_cache: Dict[str, int | None] = {}
             now_utc = datetime.now(ZoneInfo("UTC"))
             for delivery in deliveries:
                 touched += 1
                 payload = assignments.get(int(delivery.delivery_id))
                 if payload:
-                    delivery.drivers = payload.get("driver_name")
+                    driver_ref = self._first_str(payload.get("driver_name"))
+                    driver_id: int | None = None
+                    if driver_ref:
+                        cache_key = driver_ref.lower()
+                        if cache_key not in driver_id_cache:
+                            driver_id_cache[cache_key] = self._resolve_driver_user_id(
+                                session,
+                                driver_ref,
+                                users_cols=users_cols,
+                            )
+                        driver_id = driver_id_cache.get(cache_key)
+
+                    if hasattr(delivery, "assigned_driver_id"):
+                        delivery.assigned_driver_id = driver_id
+                        if driver_ref and driver_id is None:
+                            unresolved_driver_refs.add(driver_ref)
+                        if driver_id is not None:
+                            assigned += 1
+                    else:
+                        delivery.drivers = driver_ref or None
+                        if driver_ref:
+                            assigned += 1
+
                     delivery.route_sequence = payload.get("route_sequence")
-                    assigned += 1
                 else:
-                    delivery.drivers = None
+                    if hasattr(delivery, "assigned_driver_id"):
+                        delivery.assigned_driver_id = None
+                    else:
+                        delivery.drivers = None
                     delivery.route_sequence = None
                 if hasattr(delivery, "updated_at"):
                     delivery.updated_at = now_utc
@@ -1737,6 +1832,7 @@ class DatabaseService:
             "touched": touched,
             "assigned": assigned,
             "unassigned": max(0, touched - assigned),
+            "unresolved_driver_refs": sorted(unresolved_driver_refs),
         }
 
     @staticmethod
