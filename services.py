@@ -65,8 +65,8 @@ class DatabaseService:
 
     @classmethod
     def _supports_published_plan_type(cls, bind=None) -> bool:
-        if cls._published_plan_type_supported is True:
-            return True
+        if cls._published_plan_type_supported is not None:
+            return cls._published_plan_type_supported
         try:
             inspector = inspect(bind or engine)
             table_names = set(inspector.get_table_names())
@@ -74,15 +74,24 @@ class DatabaseService:
                 cols = inspector.get_columns("published_plans")
                 col_names = {str(c.get("name", "")).strip() for c in cols}
                 cls._published_plan_type_supported = "plan_type" in col_names
-            elif "Published Plans" in table_names:
-                cols = inspector.get_columns("Published Plans")
-                col_names = {str(c.get("name", "")).strip() for c in cols}
-                cls._published_plan_type_supported = "Plan Type" in col_names
             else:
                 cls._published_plan_type_supported = False
         except Exception:
             cls._published_plan_type_supported = False
         return cls._published_plan_type_supported
+
+    @staticmethod
+    def _legacy_published_plan_has_type(bind=None) -> bool:
+        try:
+            inspector = inspect(bind or engine)
+            table_names = set(inspector.get_table_names())
+            if "Published Plans" not in table_names:
+                return False
+            cols = inspector.get_columns("Published Plans")
+            col_names = {str(c.get("name", "")).strip() for c in cols}
+            return "Plan Type" in col_names
+        except Exception:
+            return False
 
     @classmethod
     def _supports_live_views(cls, bind=None) -> bool:
@@ -371,18 +380,23 @@ class DatabaseService:
         return {"id": str(delivery.delivery_id), "fields": fields}
 
     def _user_record(self, user: User) -> Dict[str, Any]:
+        session_expires_value = getattr(user, "session_expires", None)
         session_expires = (
-            user.session_expires.isoformat()
-            if isinstance(user.session_expires, datetime)
-            else user.session_expires
+            session_expires_value.isoformat()
+            if isinstance(session_expires_value, datetime)
+            else session_expires_value
         )
+        name_value = getattr(user, "name", None)
+        if not name_value:
+            name_value = getattr(user, "full_name", None)
+        session_token_value = getattr(user, "session_token", None)
         fields = {
             settings.USERS_EMAIL_FIELD: user.email,
             settings.USERS_PASSWORD_FIELD: user.password_hash,
             settings.USERS_ROLE_FIELD: user.role,
             settings.USERS_ACTIVE_FIELD: user.active,
-            settings.USERS_NAME_FIELD: user.name,
-            settings.USERS_SESSION_TOKEN_FIELD: user.session_token,
+            settings.USERS_NAME_FIELD: name_value,
+            settings.USERS_SESSION_TOKEN_FIELD: session_token_value,
             settings.USERS_SESSION_EXPIRES_FIELD: session_expires,
         }
         return {"id": user.email, "fields": fields}
@@ -406,6 +420,45 @@ class DatabaseService:
             settings.USERS_SESSION_EXPIRES_FIELD: session_expires,
         }
         return {"id": normalized_email, "fields": fields}
+
+    @staticmethod
+    def _users_column_names(bind=None) -> set[str]:
+        try:
+            inspector = inspect(bind or engine)
+            if "users" not in set(inspector.get_table_names()):
+                return set()
+            cols = inspector.get_columns("users")
+            return {str(col.get("name", "")).strip() for col in cols}
+        except Exception:
+            return set()
+
+    def _user_record_from_users_row(self, row: Dict[str, Any]) -> Dict[str, Any]:
+        email_raw = row.get("email")
+        email = self._normalize_email(email_raw) or self._first_str(email_raw)
+        session_expires_value = row.get("session_expires")
+        if isinstance(session_expires_value, datetime):
+            session_expires = session_expires_value.isoformat()
+        else:
+            session_expires_text = self._first_str(session_expires_value).strip()
+            session_expires = session_expires_text or None
+
+        name_value = row.get("name")
+        if not name_value:
+            name_value = row.get("full_name")
+
+        active_raw = row.get("active")
+        active_value = True if active_raw is None else self._to_bool(active_raw)
+
+        fields = {
+            settings.USERS_EMAIL_FIELD: email,
+            settings.USERS_PASSWORD_FIELD: row.get("password_hash"),
+            settings.USERS_ROLE_FIELD: row.get("role"),
+            settings.USERS_ACTIVE_FIELD: active_value,
+            settings.USERS_NAME_FIELD: name_value,
+            settings.USERS_SESSION_TOKEN_FIELD: row.get("session_token"),
+            settings.USERS_SESSION_EXPIRES_FIELD: session_expires,
+        }
+        return {"id": email, "fields": fields}
 
     @staticmethod
     def _users_select_sql() -> str:
@@ -482,9 +535,10 @@ class DatabaseService:
     def _legacy_plan_record(self, row: Dict[str, Any]) -> Dict[str, Any]:
         plan_date_val = row.get("Plan Date")
         plan_date = plan_date_val.isoformat() if hasattr(plan_date_val, "isoformat") else str(plan_date_val or "")
+        plan_type = self._normalize_plan_type(row.get("Plan Type"), default="published")
         fields = {
             settings.PUBLISHED_PLANS_DATE_FIELD: plan_date,
-            settings.PUBLISHED_PLANS_TYPE_FIELD: "published",
+            settings.PUBLISHED_PLANS_TYPE_FIELD: plan_type,
             settings.PUBLISHED_PLANS_FLEET_FIELD: row.get("Fleet JSON"),
             settings.PUBLISHED_PLANS_ROUTES_FIELD: row.get("Routes JSON"),
             settings.PUBLISHED_PLANS_DELIVERIES_FIELD: row.get("Deliveries JSON"),
@@ -494,7 +548,8 @@ class DatabaseService:
             settings.PUBLISHED_PLANS_PUBLISHED_BY_FIELD: row.get("Published By"),
             settings.PUBLISHED_PLANS_UPDATED_AT_FIELD: row.get("Published At"),
         }
-        return {"id": plan_date, "fields": fields, "createdTime": row.get("Published At")}
+        record_id = f"{plan_date}::{plan_type}" if plan_type != "published" else plan_date
+        return {"id": record_id, "fields": fields, "createdTime": row.get("Published At")}
 
     def _plan_payload(self, plan: PublishedPlan) -> Dict[str, Any]:
         plan_date = plan.plan_date.isoformat() if plan.plan_date else None
@@ -520,9 +575,10 @@ class DatabaseService:
     def _legacy_plan_payload(self, row: Dict[str, Any]) -> Dict[str, Any]:
         plan_date_val = row.get("Plan Date")
         plan_date = plan_date_val.isoformat() if hasattr(plan_date_val, "isoformat") else str(plan_date_val or "")
+        plan_type = self._normalize_plan_type(row.get("Plan Type"), default="published")
         return {
             "plan_date": plan_date,
-            "plan_type": "published",
+            "plan_type": plan_type,
             "routes": self._json_load(row.get("Routes JSON"), []),
             "deliveries": self._json_load(row.get("Deliveries JSON"), []),
             "meta": self._json_load(row.get("Meta JSON"), {}),
@@ -557,24 +613,41 @@ class DatabaseService:
             if not self._supports_published_plan_type(session.bind):
                 if not self._table_exists("Published Plans", session.bind):
                     return []
-                if normalized_type != "published":
+                has_legacy_type = self._legacy_published_plan_has_type(session.bind)
+                if normalized_type not in {"published", "all", "*"} and not has_legacy_type:
                     return []
+                params: Dict[str, Any] = {}
+                type_expr = (
+                    "COALESCE(NULLIF(btrim(\"Plan Type\"), ''), 'published') AS \"Plan Type\""
+                    if has_legacy_type
+                    else "'published' AS \"Plan Type\""
+                )
+                where_clause = ""
+                if normalized_type not in {"all", "*"}:
+                    if has_legacy_type:
+                        where_clause = "WHERE COALESCE(NULLIF(btrim(\"Plan Type\"), ''), 'published') = :plan_type"
+                        params["plan_type"] = normalized_type
+                    elif normalized_type != "published":
+                        return []
                 rows = session.execute(
                     text(
-                        """
+                        f"""
                         SELECT
                             "Plan Date",
+                            {type_expr},
                             "Published At",
                             "Published By"
                         FROM "Published Plans"
+                        {where_clause}
                         ORDER BY "Plan Date" DESC
                         """
-                    )
+                    ),
+                    params,
                 ).mappings().all()
                 return [
                     {
                         "plan_date": row.get("Plan Date").isoformat() if hasattr(row.get("Plan Date"), "isoformat") else str(row.get("Plan Date") or ""),
-                        "plan_type": "published",
+                        "plan_type": self._normalize_plan_type(row.get("Plan Type"), default="published"),
                         "updated_at": row.get("Published At"),
                         "updated_by": row.get("Published By"),
                     }
@@ -606,13 +679,25 @@ class DatabaseService:
             if not self._supports_published_plan_type(session.bind):
                 if not self._table_exists("Published Plans", session.bind):
                     return None
-                if normalized_type != "published":
+                has_legacy_type = self._legacy_published_plan_has_type(session.bind)
+                if normalized_type != "published" and not has_legacy_type:
                     return None
+                params: Dict[str, Any] = {"plan_date": plan_dt}
+                type_expr = (
+                    "COALESCE(NULLIF(btrim(\"Plan Type\"), ''), 'published') AS \"Plan Type\""
+                    if has_legacy_type
+                    else "'published' AS \"Plan Type\""
+                )
+                where_extra = ""
+                if has_legacy_type:
+                    where_extra = "AND COALESCE(NULLIF(btrim(\"Plan Type\"), ''), 'published') = :plan_type"
+                    params["plan_type"] = normalized_type
                 row = session.execute(
                     text(
-                        """
+                        f"""
                         SELECT
                             "Plan Date",
+                            {type_expr},
                             "Fleet JSON",
                             "Routes JSON",
                             "Deliveries JSON",
@@ -623,9 +708,10 @@ class DatabaseService:
                             "Published At"
                         FROM "Published Plans"
                         WHERE "Plan Date" = :plan_date
+                          {where_extra}
                         """
                     ),
-                    {"plan_date": plan_dt},
+                    params,
                 ).mappings().first()
                 if not row:
                     return None
@@ -648,48 +734,86 @@ class DatabaseService:
             if not self._supports_published_plan_type(session.bind):
                 if not self._table_exists("Published Plans", session.bind):
                     raise ValueError("Published plans storage is not configured.")
-                if normalized_type != "published":
+                has_legacy_type = self._legacy_published_plan_has_type(session.bind)
+                if normalized_type != "published" and not has_legacy_type:
                     raise ValueError(
                         'Published Plans schema is missing "Plan Type". Add the column before saving plan records.'
                     )
-                session.execute(
-                    text(
-                        """
-                        INSERT INTO "Published Plans"
-                            ("Plan Date", "Fleet JSON", "Routes JSON", "Deliveries JSON", "Meta JSON",
-                             "Driver Profiles JSON", "Status", "Published By", "Published At")
-                        VALUES
-                            (:plan_date, :fleet_json, :routes_json, :deliveries_json, :meta_json,
-                             :driver_profiles_json, :status, :published_by, :published_at)
-                        ON CONFLICT ("Plan Date") DO UPDATE SET
-                            "Fleet JSON" = EXCLUDED."Fleet JSON",
-                            "Routes JSON" = EXCLUDED."Routes JSON",
-                            "Deliveries JSON" = EXCLUDED."Deliveries JSON",
-                            "Meta JSON" = EXCLUDED."Meta JSON",
-                            "Driver Profiles JSON" = EXCLUDED."Driver Profiles JSON",
-                            "Status" = EXCLUDED."Status",
-                            "Published By" = EXCLUDED."Published By",
-                            "Published At" = EXCLUDED."Published At"
-                        """
-                    ),
-                    {
-                        "plan_date": plan_dt,
-                        "fleet_json": self._json_dumps(fields.get("fleet", {})),
-                        "routes_json": self._json_dumps(fields.get("routes", [])),
-                        "deliveries_json": self._json_dumps(fields.get("deliveries", [])),
-                        "meta_json": self._json_dumps(fields.get("meta", {})),
-                        "driver_profiles_json": self._json_dumps(fields.get("driver_profiles", [])),
-                        "status": self._first_str(fields.get("status")) if fields.get("status") not in (None, "") else None,
-                        "published_by": fields.get("updated_by"),
-                        "published_at": fields.get("updated_at"),
-                    },
-                )
+                params = {
+                    "plan_date": plan_dt,
+                    "plan_type": normalized_type,
+                    "fleet_json": self._json_dumps(fields.get("fleet", {})),
+                    "routes_json": self._json_dumps(fields.get("routes", [])),
+                    "deliveries_json": self._json_dumps(fields.get("deliveries", [])),
+                    "meta_json": self._json_dumps(fields.get("meta", {})),
+                    "driver_profiles_json": self._json_dumps(fields.get("driver_profiles", [])),
+                    "status": self._first_str(fields.get("status")) if fields.get("status") not in (None, "") else None,
+                    "published_by": fields.get("updated_by"),
+                    "published_at": fields.get("updated_at"),
+                }
+                if has_legacy_type:
+                    session.execute(
+                        text(
+                            """
+                            INSERT INTO "Published Plans"
+                                ("Plan Date", "Plan Type", "Fleet JSON", "Routes JSON", "Deliveries JSON", "Meta JSON",
+                                 "Driver Profiles JSON", "Status", "Published By", "Published At")
+                            VALUES
+                                (:plan_date, :plan_type, :fleet_json, :routes_json, :deliveries_json, :meta_json,
+                                 :driver_profiles_json, :status, :published_by, :published_at)
+                            ON CONFLICT ("Plan Date", "Plan Type") DO UPDATE SET
+                                "Fleet JSON" = EXCLUDED."Fleet JSON",
+                                "Routes JSON" = EXCLUDED."Routes JSON",
+                                "Deliveries JSON" = EXCLUDED."Deliveries JSON",
+                                "Meta JSON" = EXCLUDED."Meta JSON",
+                                "Driver Profiles JSON" = EXCLUDED."Driver Profiles JSON",
+                                "Status" = EXCLUDED."Status",
+                                "Published By" = EXCLUDED."Published By",
+                                "Published At" = EXCLUDED."Published At"
+                            """
+                        ),
+                        params,
+                    )
+                else:
+                    session.execute(
+                        text(
+                            """
+                            INSERT INTO "Published Plans"
+                                ("Plan Date", "Fleet JSON", "Routes JSON", "Deliveries JSON", "Meta JSON",
+                                 "Driver Profiles JSON", "Status", "Published By", "Published At")
+                            VALUES
+                                (:plan_date, :fleet_json, :routes_json, :deliveries_json, :meta_json,
+                                 :driver_profiles_json, :status, :published_by, :published_at)
+                            ON CONFLICT ("Plan Date") DO UPDATE SET
+                                "Fleet JSON" = EXCLUDED."Fleet JSON",
+                                "Routes JSON" = EXCLUDED."Routes JSON",
+                                "Deliveries JSON" = EXCLUDED."Deliveries JSON",
+                                "Meta JSON" = EXCLUDED."Meta JSON",
+                                "Driver Profiles JSON" = EXCLUDED."Driver Profiles JSON",
+                                "Status" = EXCLUDED."Status",
+                                "Published By" = EXCLUDED."Published By",
+                                "Published At" = EXCLUDED."Published At"
+                            """
+                        ),
+                        params,
+                    )
                 session.commit()
+                where_extra = ""
+                query_params: Dict[str, Any] = {"plan_date": plan_dt}
+                type_expr = (
+                    "COALESCE(NULLIF(btrim(\"Plan Type\"), ''), 'published') AS \"Plan Type\""
+                    if has_legacy_type
+                    else "'published' AS \"Plan Type\""
+                )
+                if has_legacy_type:
+                    where_extra = "AND COALESCE(NULLIF(btrim(\"Plan Type\"), ''), 'published') = :plan_type"
+                    query_params["plan_type"] = normalized_type
                 row = session.execute(
                     text(
-                        """
+                        f"""
                         SELECT
                             "Plan Date",
+                            {type_expr},
                             "Fleet JSON",
                             "Routes JSON",
                             "Deliveries JSON",
@@ -700,9 +824,10 @@ class DatabaseService:
                             "Published At"
                         FROM "Published Plans"
                         WHERE "Plan Date" = :plan_date
+                          {where_extra}
                         """
                     ),
-                    {"plan_date": plan_dt},
+                    query_params,
                 ).mappings().first()
                 if not row:
                     raise ValueError("Failed to save published plan.")
@@ -813,11 +938,16 @@ class DatabaseService:
             elif key == settings.USERS_ACTIVE_FIELD:
                 user.active = self._to_bool(value)
             elif key == settings.USERS_NAME_FIELD:
-                user.name = self._first_str(value) if value not in (None, "") else None
+                if hasattr(user, "name"):
+                    user.name = self._first_str(value) if value not in (None, "") else None
+                elif hasattr(user, "full_name"):
+                    user.full_name = self._first_str(value) if value not in (None, "") else None
             elif key == settings.USERS_SESSION_TOKEN_FIELD:
-                user.session_token = self._first_str(value) if value not in (None, "") else None
+                if hasattr(user, "session_token"):
+                    user.session_token = self._first_str(value) if value not in (None, "") else None
             elif key == settings.USERS_SESSION_EXPIRES_FIELD:
-                user.session_expires = self._coerce_datetime(value)
+                if hasattr(user, "session_expires"):
+                    user.session_expires = self._coerce_datetime(value)
 
     def _apply_plan_fields(self, plan: PublishedPlan, fields: Dict[str, Any]) -> None:
         for key, value in (fields or {}).items():
@@ -856,7 +986,17 @@ class DatabaseService:
                 return None
             return session.get(Jobsite, pk)
         if self._is_users_table(table_name):
-            return session.get(User, str(record_id))
+            raw = str(record_id or "").strip()
+            if not raw:
+                return None
+            if raw.isdigit() and hasattr(User, "user_id"):
+                rec = session.get(User, int(raw))
+                if rec:
+                    return rec
+            normalized = self._normalize_email(raw)
+            return session.execute(
+                select(User).where(func.lower(func.trim(User.email)) == normalized)
+            ).scalar_one_or_none()
         if self._is_published_plans_table(table_name):
             raw_id = str(record_id or "").strip()
             if "::" in raw_id:
@@ -1997,17 +2137,44 @@ class DatabaseService:
                     logger.info("Auth debug DB url unavailable: %s", e)
             try:
                 if self._table_exists("users", session.bind):
-                    user = session.execute(
-                        select(User).where(func.lower(func.trim(User.email)) == normalized)
-                    ).scalar_one_or_none()
+                    users_cols = self._users_column_names(session.bind)
+                    required = {"email", "password_hash", "role", "active"}
+                    if required.issubset(users_cols):
+                        select_cols = ["email", "password_hash", "role", "active"]
+                        if "name" in users_cols:
+                            select_cols.append("name")
+                        if "full_name" in users_cols:
+                            select_cols.append("full_name")
+                        if "session_token" in users_cols:
+                            select_cols.append("session_token")
+                        if "session_expires" in users_cols:
+                            select_cols.append("session_expires")
+                        row = session.execute(
+                            text(
+                                f"""
+                                SELECT {", ".join(select_cols)}
+                                FROM users
+                                WHERE lower(trim(email)) = :email
+                                LIMIT 1
+                                """
+                            ),
+                            {"email": normalized},
+                        ).mappings().first()
+                        user_record = self._user_record_from_users_row(dict(row)) if row else None
+                    else:
+                        user_record = None
                     if settings.AUTH_DEBUG:
-                        if user:
-                            logger.info("Auth debug DB user row email=%s active=%s", user.email, user.active)
+                        if user_record:
+                            fields = user_record.get("fields", {})
+                            logger.info(
+                                "Auth debug DB user row email=%s active=%s",
+                                fields.get(settings.USERS_EMAIL_FIELD),
+                                fields.get(settings.USERS_ACTIVE_FIELD),
+                            )
                         else:
                             logger.info("Auth debug DB user row not found for email=%s", normalized)
-                    if not user:
-                        return None
-                    return self._user_record(user)
+                    if user_record:
+                        return user_record
 
                 if self._table_exists("Users", session.bind):
                     user_record = self._query_legacy_user_by_email(session, normalized)
@@ -2028,12 +2195,81 @@ class DatabaseService:
         with SessionLocal() as session:
             try:
                 if self._table_exists("users", session.bind):
-                    user = session.execute(
-                        select(User).where(User.session_token == token)
-                    ).scalar_one_or_none()
-                    if not user:
-                        return None
-                    return self._user_record(user)
+                    users_cols = self._users_column_names(session.bind)
+                    if self._table_exists("auth_sessions", session.bind) and "user_id" in users_cols:
+                        select_cols = [
+                            "u.email AS email",
+                            "u.password_hash AS password_hash",
+                            "u.role AS role",
+                            "u.active AS active",
+                            "s.session_token AS session_token",
+                            "s.expires_at AS session_expires",
+                        ]
+                        if "name" in users_cols:
+                            select_cols.append("u.name AS name")
+                        if "full_name" in users_cols:
+                            select_cols.append("u.full_name AS full_name")
+
+                        row = session.execute(
+                            text(
+                                f"""
+                                SELECT {", ".join(select_cols)}
+                                FROM auth_sessions s
+                                JOIN users u ON u.user_id = s.user_id
+                                WHERE s.session_token = :token
+                                  AND s.revoked_at IS NULL
+                                  AND (s.expires_at IS NULL OR s.expires_at > NOW())
+                                LIMIT 1
+                                """
+                            ),
+                            {"token": token},
+                        ).mappings().first()
+                        if row:
+                            try:
+                                session.execute(
+                                    text(
+                                        """
+                                        UPDATE auth_sessions
+                                        SET last_seen_at = NOW()
+                                        WHERE session_token = :token
+                                        """
+                                    ),
+                                    {"token": token},
+                                )
+                                session.commit()
+                            except Exception:
+                                session.rollback()
+                            return self._user_record_from_users_row(dict(row))
+
+                    if "session_token" in users_cols:
+                        select_cols = [
+                            "email",
+                            "password_hash",
+                            "role",
+                            "active",
+                            "session_token",
+                        ]
+                        if "session_expires" in users_cols:
+                            select_cols.append("session_expires")
+                        else:
+                            select_cols.append("NULL AS session_expires")
+                        if "name" in users_cols:
+                            select_cols.append("name")
+                        if "full_name" in users_cols:
+                            select_cols.append("full_name")
+                        row = session.execute(
+                            text(
+                                f"""
+                                SELECT {", ".join(select_cols)}
+                                FROM users
+                                WHERE session_token = :token
+                                LIMIT 1
+                                """
+                            ),
+                            {"token": token},
+                        ).mappings().first()
+                        if row:
+                            return self._user_record_from_users_row(dict(row))
                 if self._table_exists("Users", session.bind):
                     return self._query_legacy_user_by_session_token(session, token)
                 return None
@@ -2072,21 +2308,110 @@ class DatabaseService:
 
     def update_user_session(self, record_id: str, token: str | None, expires_iso: str | None):
         normalized = self._normalize_email(record_id)
-        if not normalized:
+        raw_record_id = str(record_id or "").strip()
+        if not normalized and not raw_record_id:
             raise ValueError("Invalid user record id.")
         expires_dt = self._coerce_datetime(expires_iso)
         with SessionLocal() as session:
             if self._table_exists("users", session.bind):
-                user = session.get(User, normalized)
-                if not user:
-                    raise ValueError("Record not found.")
-                user.session_token = token
-                user.session_expires = expires_dt
-                if hasattr(user, "updated_at"):
-                    user.updated_at = datetime.now(ZoneInfo("UTC"))
-                session.commit()
-                session.refresh(user)
-                result = self._user_record(user)
+                users_cols = self._users_column_names(session.bind)
+                if self._table_exists("auth_sessions", session.bind) and "user_id" in users_cols:
+                    user_row = None
+                    if normalized:
+                        user_row = session.execute(
+                            text(
+                                """
+                                SELECT user_id, email
+                                FROM users
+                                WHERE lower(trim(email)) = :email
+                                LIMIT 1
+                                """
+                            ),
+                            {"email": normalized},
+                        ).mappings().first()
+                    if not user_row and raw_record_id.isdigit():
+                        user_row = session.execute(
+                            text(
+                                """
+                                SELECT user_id, email
+                                FROM users
+                                WHERE user_id = :user_id
+                                LIMIT 1
+                                """
+                            ),
+                            {"user_id": int(raw_record_id)},
+                        ).mappings().first()
+                    if not user_row:
+                        raise ValueError("Record not found.")
+
+                    user_id = user_row.get("user_id")
+                    user_email = self._normalize_email(user_row.get("email")) or self._first_str(user_row.get("email"))
+
+                    session.execute(
+                        text(
+                            """
+                            UPDATE auth_sessions
+                            SET revoked_at = NOW()
+                            WHERE user_id = :user_id
+                              AND revoked_at IS NULL
+                            """
+                        ),
+                        {"user_id": user_id},
+                    )
+                    if token:
+                        session.execute(
+                            text(
+                                """
+                                INSERT INTO auth_sessions (
+                                    user_id,
+                                    session_token,
+                                    expires_at,
+                                    created_at,
+                                    last_seen_at
+                                )
+                                VALUES (
+                                    :user_id,
+                                    :token,
+                                    :expires_at,
+                                    NOW(),
+                                    NOW()
+                                )
+                                """
+                            ),
+                            {
+                                "user_id": user_id,
+                                "token": token,
+                                "expires_at": expires_dt,
+                            },
+                        )
+                    session.commit()
+                    result = self.get_user_by_email(user_email) if user_email else None
+                elif "session_token" in users_cols:
+                    if not normalized:
+                        raise ValueError("Invalid user record id.")
+                    set_parts = ["session_token = :token"]
+                    params: Dict[str, Any] = {"token": token, "email": normalized}
+                    if "session_expires" in users_cols:
+                        set_parts.append("session_expires = :expires")
+                        params["expires"] = expires_dt
+                    if "updated_at" in users_cols:
+                        set_parts.append("updated_at = NOW()")
+                    update_result = session.execute(
+                        text(
+                            f"""
+                            UPDATE users
+                            SET {", ".join(set_parts)}
+                            WHERE lower(trim(email)) = :email
+                            """
+                        ),
+                        params,
+                    )
+                    if (update_result.rowcount or 0) <= 0:
+                        raise ValueError("Record not found.")
+                    session.commit()
+                    result = self.get_user_by_email(normalized)
+                else:
+                    raise ValueError("Users storage does not support session fields.")
             elif self._table_exists("Users", session.bind):
                 update_result = session.execute(
                     text(
@@ -2350,13 +2675,28 @@ class DatabaseService:
             if not self._supports_published_plan_type(session.bind):
                 if not self._table_exists("Published Plans", session.bind):
                     return []
-                if normalized_type not in {"published", "all", "*"}:
+                has_legacy_type = self._legacy_published_plan_has_type(session.bind)
+                if normalized_type not in {"published", "all", "*"} and not has_legacy_type:
                     return []
+                params: Dict[str, Any] = {}
+                type_expr = (
+                    "COALESCE(NULLIF(btrim(\"Plan Type\"), ''), 'published') AS \"Plan Type\""
+                    if has_legacy_type
+                    else "'published' AS \"Plan Type\""
+                )
+                where_clause = ""
+                if not include_all_types:
+                    if has_legacy_type:
+                        where_clause = "WHERE COALESCE(NULLIF(btrim(\"Plan Type\"), ''), 'published') = :plan_type"
+                        params["plan_type"] = normalized_type
+                    elif normalized_type != "published":
+                        return []
                 rows = session.execute(
                     text(
-                        """
+                        f"""
                         SELECT
                             "Plan Date",
+                            {type_expr},
                             "Fleet JSON",
                             "Routes JSON",
                             "Deliveries JSON",
@@ -2366,9 +2706,11 @@ class DatabaseService:
                             "Published By",
                             "Published At"
                         FROM "Published Plans"
+                        {where_clause}
                         ORDER BY "Plan Date" DESC
                         """
-                    )
+                    ),
+                    params,
                 ).mappings().all()
                 return [self._legacy_plan_record(dict(row)) for row in rows]
             if include_all_types:
