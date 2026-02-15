@@ -37,6 +37,7 @@ class Delivery(Base):
     scheduled_date = Column("scheduled_date", Date)
     route_sequence = Column("route_sequence", Integer)
     assigned_driver_id = Column("assigned_driver_id", Integer, ForeignKey("users.user_id"))
+    ps_delivered = Column("ps_delivered", Boolean)
     status = Column("status", Text)
     status_updated_at = Column("status_updated_at", DateTime(timezone=True))
     arrived_at = Column("arrived_at", DateTime(timezone=True))
@@ -79,21 +80,6 @@ class Delivery(Base):
             self.assigned_driver_id = int(value)
         except Exception:
             self.assigned_driver_id = None
-
-    @property
-    def ps_delivered(self):
-        status = str(self.status or "").strip().lower()
-        return bool(self.delivered_at) or status == "delivered"
-
-    @ps_delivered.setter
-    def ps_delivered(self, value):
-        # Legacy compatibility: when older code toggles this flag, mirror it to status.
-        if value:
-            if not self.status:
-                self.status = "delivered"
-            return
-        if str(self.status or "").strip().lower() == "delivered":
-            self.status = None
 
 
 class User(Base):

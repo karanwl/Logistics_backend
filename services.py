@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-from sqlalchemy import func, inspect, select, text
+from sqlalchemy import cast, func, inspect, select, text
 from sqlalchemy.exc import SQLAlchemyError
 
 from config import settings
@@ -1108,12 +1108,7 @@ class DatabaseService:
                 if not delivery_id_raw:
                     errors.append({"delivery_id": delivery_id_raw, "error": "Missing delivery_id."})
                     continue
-                try:
-                    delivery_id = int(delivery_id_raw)
-                except Exception:
-                    errors.append({"delivery_id": delivery_id_raw, "error": "Invalid delivery_id."})
-                    continue
-                delivery = session.get(Delivery, delivery_id)
+                delivery = self._find_delivery_by_business_id(session, delivery_id_raw)
                 if not delivery:
                     errors.append({"delivery_id": delivery_id_raw, "error": "Delivery not found."})
                     continue
@@ -1151,7 +1146,7 @@ class DatabaseService:
 
                 if hasattr(delivery, "updated_at"):
                     delivery.updated_at = datetime.now(ZoneInfo("UTC"))
-                updated_ids.append(str(delivery.delivery_id))
+                updated_ids.append(str(getattr(delivery, "delivery_id", "") or delivery_id_raw))
             session.commit()
         if updated_ids:
             self._invalidate_cache("Deliveries")
@@ -1893,11 +1888,10 @@ class DatabaseService:
         delivered_at = str(delivery.get("delivered_at") or "").strip()
         status_updated = str(delivery.get("status_updated_at") or "").strip()
         arrived_at = str(delivery.get("arrived_at") or "").strip()
-        ps_delivered = bool(delivery.get("ps_delivered"))
 
         if status_raw == "failed":
             return "failed", "Failed", status_updated or arrived_at
-        if status_raw == "delivered" or delivered_at or ps_delivered:
+        if status_raw == "delivered" or delivered_at:
             return "done", "Delivered", delivered_at or status_updated or arrived_at
         if status_raw == "arrived":
             return "current", "Arrived", status_updated or arrived_at
@@ -2614,15 +2608,57 @@ class DatabaseService:
         self._invalidate_cache(settings.USERS_TABLE)
         return result
 
+    def _find_delivery_by_business_id(self, session, delivery_id: str | int | None) -> Delivery | None:
+        raw = self._first_str(delivery_id)
+        if not raw:
+            return None
+
+        numeric: int | None = None
+        try:
+            numeric = int(float(raw))
+        except Exception:
+            numeric = None
+
+        if numeric is not None:
+            rec = session.get(Delivery, numeric)
+            if rec:
+                return rec
+
+            if hasattr(Delivery, "delivery_id"):
+                rec = session.execute(
+                    select(Delivery).where(getattr(Delivery, "delivery_id") == numeric)
+                ).scalar_one_or_none()
+                if rec:
+                    return rec
+
+            if hasattr(Delivery, "id"):
+                rec = session.execute(
+                    select(Delivery).where(getattr(Delivery, "id") == numeric)
+                ).scalar_one_or_none()
+                if rec:
+                    return rec
+
+        if hasattr(Delivery, "delivery_id"):
+            rec = session.execute(
+                select(Delivery).where(cast(getattr(Delivery, "delivery_id"), Text) == raw)
+            ).scalar_one_or_none()
+            if rec:
+                return rec
+
+        if hasattr(Delivery, "id"):
+            rec = session.execute(
+                select(Delivery).where(cast(getattr(Delivery, "id"), Text) == raw)
+            ).scalar_one_or_none()
+            if rec:
+                return rec
+
+        return None
+
     def get_delivery_by_business_id(self, delivery_id: str) -> Dict[str, Any] | None:
         if not delivery_id:
             return None
-        try:
-            delivery_pk = int(str(delivery_id).strip())
-        except Exception:
-            return None
         with SessionLocal() as session:
-            delivery = session.get(Delivery, delivery_pk)
+            delivery = self._find_delivery_by_business_id(session, delivery_id)
             if not delivery:
                 return None
             return self._delivery_record(delivery)
@@ -2630,12 +2666,8 @@ class DatabaseService:
     def update_delivery_by_business_id(self, delivery_id: str, fields: Dict[str, Any]) -> Dict[str, Any] | None:
         if not delivery_id:
             return None
-        try:
-            delivery_pk = int(str(delivery_id).strip())
-        except Exception:
-            return None
         with SessionLocal() as session:
-            delivery = session.get(Delivery, delivery_pk)
+            delivery = self._find_delivery_by_business_id(session, delivery_id)
             if not delivery:
                 return None
             self._apply_delivery_fields(delivery, fields)

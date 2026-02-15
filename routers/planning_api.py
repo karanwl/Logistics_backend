@@ -1237,7 +1237,8 @@ def deliveries_bulk_update(payload: BulkUpdateDeliveriesRequest, request: Reques
     result = svc.bulk_update_deliveries_by_business_id(
         [item.model_dump(exclude_none=True) for item in items]
     )
-    resp = ok_response(request, {"ok": True, **result})
+    errors = result.get("errors") or []
+    resp = ok_response(request, {"ok": len(errors) == 0, **result})
     resp.headers["Cache-Control"] = "no-store"
     return resp
 
