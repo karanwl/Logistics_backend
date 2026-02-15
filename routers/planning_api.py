@@ -141,6 +141,8 @@ class BulkDeliveryItem(BaseModel):
     pickup: bool = False
     pickup_vehicle: str | None = None
     requires_empty_truck: bool = False
+    window_start: str | None = None
+    window_end: str | None = None
 
     @field_validator("scheduled_date")
     @classmethod
@@ -1155,6 +1157,7 @@ def deliveries_bulk_create(payload: BulkCreateDeliveriesRequest, request: Reques
         raise HTTPException(status_code=403, detail="Manager/Admin access required.")
 
     svc = DatabaseService()
+    known_jobsites: dict[str, bool] = {}
     results = []
     for idx, item in enumerate(payload.deliveries or []):
         errors = []
@@ -1168,6 +1171,18 @@ def deliveries_bulk_create(payload: BulkCreateDeliveriesRequest, request: Reques
             errors.append("Missing scheduled_date.")
         if not sales_order:
             errors.append("Missing sales_order.")
+
+        if jobsite_id:
+            exists = known_jobsites.get(jobsite_id)
+            if exists is None:
+                try:
+                    svc.get_record("Jobsites", jobsite_id)
+                    exists = True
+                except Exception:
+                    exists = False
+                known_jobsites[jobsite_id] = exists
+            if not exists:
+                errors.append("Jobsite not found. Select a jobsite that already exists.")
 
         if errors:
             results.append({"ok": False, "index": idx, "error": " ".join(errors)})
@@ -1192,6 +1207,8 @@ def deliveries_bulk_create(payload: BulkCreateDeliveriesRequest, request: Reques
             "Pickup": bool(item.pickup),
             settings.DELIVERIES_PICKUP_VEHICLE_FIELD: pickup_vehicle or None,
             "Requires Empty Truck": bool(item.requires_empty_truck),
+            "Window Start": (item.window_start or "").strip() or None,
+            "Window End": (item.window_end or "").strip() or None,
         }
         sales_order_value = parse_sales_order(sales_order)
         if sales_order_value is not None:
