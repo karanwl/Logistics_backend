@@ -1572,6 +1572,44 @@ class DatabaseService:
                         assigned.append((base_id, stop_index))
         return assigned
 
+    def _published_vehicle_delivery_lookup(
+        self,
+        plan_date: date,
+    ) -> tuple[Dict[str, str], Dict[str, Dict[str, Any]]]:
+        delivery_to_route_key: Dict[str, str] = {}
+        route_meta: Dict[str, Dict[str, Any]] = {}
+
+        payload = self.get_plan_payload(plan_date.isoformat(), "published")
+        routes = payload.get("routes") if isinstance(payload, dict) else None
+        if not isinstance(routes, list):
+            return delivery_to_route_key, route_meta
+
+        for route_index, route in enumerate(routes):
+            if not isinstance(route, dict):
+                continue
+
+            vehicle_id_raw = route.get("vehicle_id")
+            vehicle_id = self._first_str(vehicle_id_raw)
+            if not vehicle_id and vehicle_id_raw not in (None, ""):
+                vehicle_id = str(vehicle_id_raw).strip()
+            if not vehicle_id:
+                vehicle_id = str(route_index + 1)
+
+            route_key = f"vehicle:{vehicle_id}"
+            route_meta[route_key] = {
+                "vehicle_id": vehicle_id,
+                "vehicle_type": self._first_str(route.get("vehicle_type")) or "vehicle",
+                "driver_name": self._route_driver_name_from_payload(route),
+                "route_order": route_index,
+            }
+
+            for delivery_id, _stop_seq in self._route_delivery_assignments(route):
+                normalized_id = self._first_str(delivery_id)
+                if normalized_id:
+                    delivery_to_route_key[normalized_id] = route_key
+
+        return delivery_to_route_key, route_meta
+
     def build_delivery_plan_payload(self, plan_date: str | date, force_refresh: bool = False) -> Dict[str, Any]:
         target_date = self._coerce_date(plan_date)
         if not target_date:
@@ -2108,19 +2146,28 @@ class DatabaseService:
             target_date = datetime.now(ZoneInfo(settings.BUSINESS_TZ)).date()
 
         route_rows = self.list_live_route_rows(target_date, force_refresh=force_refresh)
-        driver_rows = self.list_live_driver_progress(target_date, force_refresh=force_refresh)
+        delivery_to_route_key, published_route_meta = self._published_vehicle_delivery_lookup(target_date)
 
         routes_by_key: Dict[str, Dict[str, Any]] = {}
         counts = {"done": 0, "current": 0, "upcoming": 0, "failed": 0}
         latest_update = ""
 
         for row in route_rows:
-            route_key = self._first_str(row.get("route_key")) or self._live_route_key(self._first_str(row.get("driver_name")))
+            delivery_id = self._first_str(row.get("delivery_id"))
+            route_key = (
+                delivery_to_route_key.get(delivery_id)
+                or self._first_str(row.get("route_key"))
+                or self._live_route_key(self._first_str(row.get("driver_name")))
+            )
+            meta = published_route_meta.get(route_key) or {}
             route = routes_by_key.setdefault(
                 route_key,
                 {
                     "route_key": route_key,
-                    "driver_name": self._first_str(row.get("driver_name")) or "Unassigned",
+                    "vehicle_id": self._first_str(meta.get("vehicle_id")),
+                    "vehicle_type": self._first_str(meta.get("vehicle_type")),
+                    "driver_name": self._first_str(meta.get("driver_name")) or self._first_str(row.get("driver_name")) or "Unassigned",
+                    "route_order": meta.get("route_order"),
                     "deliveries": [],
                 },
             )
@@ -2166,7 +2213,6 @@ class DatabaseService:
             if row_status_update and row_status_update > latest_update:
                 latest_update = row_status_update
 
-        driver_lookup = {self._first_str(item.get("route_key")): item for item in driver_rows}
         routes: List[Dict[str, Any]] = []
         for route_key, route in routes_by_key.items():
             route_deliveries = route.get("deliveries") or []
@@ -2176,16 +2222,37 @@ class DatabaseService:
                     d.get("delivery_id") or "",
                 )
             )
-            stats = driver_lookup.get(route_key) or {}
-            total = int(stats.get("total_stops") or len(route_deliveries))
-            done = int(stats.get("done_stops") or 0)
-            current = int(stats.get("current_stops") or 0)
-            upcoming = int(stats.get("upcoming_stops") or 0)
-            failed = int(stats.get("failed_stops") or 0)
+            total = len(route_deliveries)
+            done = 0
+            current = 0
+            upcoming = 0
+            failed = 0
+            last_completed_at = ""
+            last_status_update_at = ""
+            for delivery in route_deliveries:
+                state = self._first_str(delivery.get("status")) or "upcoming"
+                if state == "done":
+                    done += 1
+                elif state == "current":
+                    current += 1
+                elif state == "failed":
+                    failed += 1
+                else:
+                    upcoming += 1
+
+                completed_at = self._first_str(delivery.get("delivered_at"))
+                if completed_at and completed_at > last_completed_at:
+                    last_completed_at = completed_at
+                status_updated = self._first_str(delivery.get("status_updated_at"))
+                if status_updated and status_updated > last_status_update_at:
+                    last_status_update_at = status_updated
+
             completion_pct = int(round((done / total) * 100)) if total > 0 else 0
             routes.append(
                 {
                     "route_key": route_key,
+                    "vehicle_id": self._first_str(route.get("vehicle_id")),
+                    "vehicle_type": self._first_str(route.get("vehicle_type")),
                     "driver_name": self._first_str(route.get("driver_name")) or "Unassigned",
                     "total_stops": total,
                     "done_stops": done,
@@ -2193,13 +2260,31 @@ class DatabaseService:
                     "upcoming_stops": upcoming,
                     "failed_stops": failed,
                     "completion_pct": completion_pct,
-                    "last_completed_at": self._first_str(stats.get("last_completed_at")),
-                    "last_status_update_at": self._first_str(stats.get("last_status_update_at")),
+                    "last_completed_at": last_completed_at,
+                    "last_status_update_at": last_status_update_at,
+                    "route_order": route.get("route_order"),
                     "deliveries": route_deliveries,
                 }
             )
 
-        routes.sort(key=lambda item: (item.get("driver_name") or "").lower())
+        def _route_sort_key(item: Dict[str, Any]) -> tuple[int, int, str, str]:
+            order = item.get("route_order")
+            if isinstance(order, int):
+                order_rank = order
+            else:
+                order_rank = 2147483647
+            vehicle_text = self._first_str(item.get("vehicle_id"))
+            vehicle_num = self._coerce_int(vehicle_text)
+            if vehicle_num is None:
+                vehicle_num = 2147483647
+            return (
+                order_rank,
+                vehicle_num,
+                (item.get("driver_name") or "").lower(),
+                item.get("route_key") or "",
+            )
+
+        routes.sort(key=_route_sort_key)
         total = counts["done"] + counts["current"] + counts["upcoming"] + counts["failed"]
 
         return {
