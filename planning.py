@@ -802,11 +802,14 @@ def debug_tomorrow_matrix(
     route_nodes: Any = None,
     compare_nodes: Any = None,
     force_refresh: bool = False,
+    target_date: str | None = None,
+    trucks: int | None = None,
+    vans: int = 0,
 ) -> Dict[str, Any]:
     db = DatabaseService()
     mapbox = MapboxService()
 
-    deliveries = db.get_tomorrow_deliveries(force_refresh=force_refresh)
+    deliveries = db.get_tomorrow_deliveries(force_refresh=force_refresh, target_date=target_date)
     target_date = getattr(db, "_last_target_date", None)
     if not deliveries:
         return {"ok": False, "message": "No deliveries found.", "target_date": target_date}
@@ -932,8 +935,124 @@ def debug_tomorrow_matrix(
         "distance_matrix_m": _matrix_to_int_rows(distances),
         "duration_matrix_s": _matrix_to_int_rows(durations),
         "nodes": node_rows,
+        "matrix_index": [
+            {
+                "node": row.get("node"),
+                "label": row.get("label"),
+                "tokens": row.get("tokens", []),
+            }
+            for row in node_rows
+        ],
         "largest_asymmetry_sample": asym[:20],
     }
+
+    def _matrix_max_leg(raw_matrix: Any, value_field: str) -> Dict[str, Any] | None:
+        best: Dict[str, Any] | None = None
+        if not isinstance(raw_matrix, list):
+            return None
+        for i, row in enumerate(raw_matrix):
+            if not isinstance(row, list):
+                continue
+            for j, cell in enumerate(row):
+                if i == j or cell is None:
+                    continue
+                try:
+                    numeric = int(float(cell))
+                except Exception:
+                    continue
+                if numeric < 0:
+                    continue
+                if best is None or numeric > int(best.get(value_field, -1)):
+                    best = {
+                        "from_node": i,
+                        "to_node": j,
+                        value_field: numeric,
+                        "from_label": _node_label(i, node_to_jobs, deliveries_by_id),
+                        "to_label": _node_label(j, node_to_jobs, deliveries_by_id),
+                    }
+        return best
+
+    payload["matrix_extremes"] = {
+        "max_distance": _matrix_max_leg(distances, "distance_m"),
+        "max_duration": _matrix_max_leg(durations, "duration_s"),
+    }
+
+    requested_trucks = settings.PHYSICAL_TRUCKS if trucks is None else max(0, int(trucks))
+    requested_vans = max(0, int(vans))
+    run_payload = generate_tomorrow_plan(
+        trucks=requested_trucks,
+        vans=requested_vans,
+        force_refresh=force_refresh,
+        target_date=target_date,
+    )
+    run_routes = (
+        run_payload.get("routes", [])
+        if isinstance(run_payload, dict) and isinstance(run_payload.get("routes"), list)
+        else []
+    )
+    visited_nodes: set[int] = set()
+    run_route_rows: List[Dict[str, Any]] = []
+    for route in run_routes:
+        stop_nodes_raw = route.get("stop_nodes") if isinstance(route, dict) else []
+        matrix_stop_nodes: List[int] = []
+        for item in stop_nodes_raw or []:
+            try:
+                node_idx = int(item)
+            except Exception:
+                continue
+            if node_idx <= 0 or node_idx >= len(coords_list):
+                continue
+            matrix_stop_nodes.append(node_idx)
+            visited_nodes.add(node_idx)
+        run_route_rows.append(
+            {
+                "vehicle_id": route.get("vehicle_id"),
+                "vehicle_type": route.get("vehicle_type"),
+                "total_distance_m": route.get("total_distance_m"),
+                "total_time_s": route.get("total_time_s"),
+                "matrix_stop_nodes": matrix_stop_nodes,
+                "matrix_stop_labels": [
+                    _node_label(node_idx, node_to_jobs, deliveries_by_id) for node_idx in matrix_stop_nodes
+                ],
+                "matrix_breakdown": _matrix_route_breakdown(
+                    matrix_stop_nodes, distances, durations, node_to_jobs, deliveries_by_id
+                ),
+            }
+        )
+
+    required_nodes = set(range(1, len(coords_list)))
+    dropped_nodes = sorted(required_nodes - visited_nodes)
+    node_lookup = {int(row.get("node", -1)): row for row in node_rows}
+    dropped_node_rows: List[Dict[str, Any]] = []
+    for node_idx in dropped_nodes:
+        row = node_lookup.get(node_idx) or {}
+        dropped_node_rows.append(
+            {
+                "node": node_idx,
+                "label": _node_label(node_idx, node_to_jobs, deliveries_by_id),
+                "lon": row.get("lon"),
+                "lat": row.get("lat"),
+                "tokens": row.get("tokens", []),
+            }
+        )
+
+    payload["run_debug"] = {
+        "requested_fleet": {
+            "trucks": int(requested_trucks),
+            "vans": int(requested_vans),
+            "vehicle_count": int(max(0, requested_trucks) + max(0, requested_vans)),
+        },
+        "route_count": len(run_route_rows),
+        "routes": run_route_rows,
+        "required_node_count": len(required_nodes),
+        "visited_node_count": len(visited_nodes),
+        "dropped_count": len(dropped_node_rows),
+        "dropped_nodes": dropped_node_rows,
+        "run_message": run_payload.get("message") if isinstance(run_payload, dict) else None,
+        "run_meta": run_payload.get("meta") if isinstance(run_payload, dict) else {},
+        "run_geocode_failures": run_payload.get("geocode_failures") if isinstance(run_payload, dict) else [],
+    }
+
     if primary_nodes:
         payload["primary_route"] = _matrix_route_breakdown(
             primary_nodes, distances, durations, node_to_jobs, deliveries_by_id

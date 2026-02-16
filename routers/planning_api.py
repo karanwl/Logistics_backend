@@ -14,7 +14,7 @@ import uuid
 import threading
 
 from auth import get_current_user, hash_password
-from planning import generate_tomorrow_plan, recalculate_tomorrow_plan
+from planning import debug_tomorrow_matrix, generate_tomorrow_plan, recalculate_tomorrow_plan
 from push_notifications import send_push_notification, tokens_for_identities
 from services import DatabaseService, MapboxService
 from config import settings
@@ -939,6 +939,37 @@ def solve_status(job_id: str, request: Request):
     if not job:
         raise HTTPException(status_code=404, detail="Job not found.")
     resp = ok_response(request, job)
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@router.get("/plan/debug/matrix")
+def plan_debug_matrix(
+    request: Request,
+    date: str | None = None,
+    trucks: int | None = None,
+    vans: int = 0,
+    route_nodes: str | None = None,
+    compare_nodes: str | None = None,
+):
+    user = get_current_user(request)
+    if not user or user.get("role") not in ("manager", "admin"):
+        raise HTTPException(status_code=403, detail="Manager/Admin access required.")
+    if trucks is not None and int(trucks) < 0:
+        raise HTTPException(status_code=400, detail="trucks must be >= 0.")
+    if int(vans) < 0:
+        raise HTTPException(status_code=400, detail="vans must be >= 0.")
+
+    plan_date = _require_iso_date_param(date, "date") if date else _next_plan_date()
+    payload = debug_tomorrow_matrix(
+        route_nodes=route_nodes,
+        compare_nodes=compare_nodes,
+        force_refresh=_wants_refresh(request),
+        target_date=plan_date,
+        trucks=trucks,
+        vans=vans,
+    )
+    resp = ok_response(request, payload)
     resp.headers["Cache-Control"] = "no-store"
     return resp
 
