@@ -42,7 +42,7 @@ class RouteOptimizer:
         "downtown_soft_latest_s": 4 * 3600,   # 10:00 (from 6:00 start)
         "downtown_hard_latest_s": 6 * 3600,   # 12:00 hard cap
         "downtown_late_penalty_per_sec": 60,
-        "van_fixed_cost": 0,
+        "van_fixed_cost": 1500,
         "truck_fixed_cost_physical": 15000,
         "truck_fixed_cost_overflow": 100000,
         "drop_node_penalty": 100000,
