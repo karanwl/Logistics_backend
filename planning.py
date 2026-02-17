@@ -718,6 +718,230 @@ def recalculate_tomorrow_plan(routes: List[Dict[str, Any]], force_refresh: bool 
     }
 
 
+def _to_float(value: Any) -> float | None:
+    try:
+        if value in (None, ""):
+            return None
+        return float(value)
+    except Exception:
+        return None
+
+
+def _seconds_to_hhmm_from_6am(seconds: int) -> str:
+    total = (6 * 3600) + max(0, int(seconds))
+    hh = (total // 3600) % 24
+    mm = (total % 3600) // 60
+    return f"{hh:02d}:{mm:02d}"
+
+
+def recalculate_manual_plan(
+    routes: List[Dict[str, Any]],
+    deliveries: List[Dict[str, Any]],
+    depot_lat: float | None = None,
+    depot_lon: float | None = None,
+    force_refresh: bool = False,
+) -> Dict[str, Any]:
+    mapbox = MapboxService()
+
+    depot_lat_f = _to_float(depot_lat)
+    depot_lon_f = _to_float(depot_lon)
+    if depot_lat_f is None:
+        depot_lat_f = float(getattr(settings, "DEPOT_LAT", 0.0) or 0.0)
+    if depot_lon_f is None:
+        depot_lon_f = float(getattr(settings, "DEPOT_LON", 0.0) or 0.0)
+
+    coords_list: List[Tuple[float, float]] = [(depot_lon_f, depot_lat_f)]
+    node_by_delivery_id: Dict[str, int] = {}
+    missing_delivery_coordinates: List[str] = []
+
+    for item in deliveries or []:
+        if not isinstance(item, dict):
+            continue
+        delivery_id = str(item.get("id") or item.get("delivery_id") or "").strip()
+        if not delivery_id:
+            continue
+        lat = _to_float(item.get("lat"))
+        lon = _to_float(item.get("lon"))
+        if lat is None or lon is None:
+            missing_delivery_coordinates.append(delivery_id)
+            continue
+        if abs(lat) < 1e-9 and abs(lon) < 1e-9:
+            missing_delivery_coordinates.append(delivery_id)
+            continue
+        node_by_delivery_id[delivery_id] = len(coords_list)
+        coords_list.append((lon, lat))
+
+    distances: List[List[float]] = []
+    durations: List[List[float]] = []
+    if len(coords_list) >= 2:
+        matrix = mapbox.get_matrix(coords_list, force_refresh=force_refresh)
+        distances = matrix.get("distances", []) or []
+        durations = matrix.get("durations", []) or []
+
+    truck_time_factor = 1.10
+    truck_service_time_s = 30 * 60
+    van_service_time_s = 10 * 60
+    reload_service_time_s = int(getattr(settings, "RELOAD_SERVICE_TIME_S", 0) or 0)
+
+    def _delivery_id_from_stop_item(stop_item: Any) -> str:
+        if isinstance(stop_item, dict):
+            raw_id = stop_item.get("id") or stop_item.get("delivery_id")
+            return str(raw_id or "").strip()
+        if isinstance(stop_item, (str, int)):
+            token = str(stop_item).strip()
+            if not token:
+                return ""
+            lowered = token.lower()
+            if lowered in {"depot", "depot - reload"}:
+                return ""
+            return token.split("_Part", 1)[0].strip()
+        return ""
+
+    def _is_depot_stop(stop_group: List[Any]) -> bool:
+        for item in stop_group:
+            if isinstance(item, dict):
+                if str(item.get("type") or "").strip().lower() == "depot":
+                    return True
+                label = str(item.get("label") or "").strip().lower()
+                if label in {"depot", "depot - reload"}:
+                    return True
+            elif isinstance(item, (str, int)):
+                token = str(item).strip().lower()
+                if token in {"depot", "depot - reload"}:
+                    return True
+        return False
+
+    recalced: List[Dict[str, Any]] = []
+    total_distance_all = 0
+    total_duration_all = 0
+    total_stop_count = 0
+
+    for route in routes or []:
+        if not isinstance(route, dict):
+            continue
+        v_type = str(route.get("vehicle_type") or route.get("v_type") or "truck").strip().lower()
+        raw_stops = route.get("stops") if isinstance(route.get("stops"), list) else []
+        route_nodes: List[int] = []
+
+        for stop in raw_stops:
+            group = stop if isinstance(stop, list) else [stop]
+            if _is_depot_stop(group):
+                route_nodes.append(0)
+                continue
+            found_node: int | None = None
+            for stop_item in group:
+                delivery_id = _delivery_id_from_stop_item(stop_item)
+                if not delivery_id:
+                    continue
+                node_idx = node_by_delivery_id.get(delivery_id)
+                if node_idx is not None:
+                    found_node = node_idx
+                    break
+            if found_node is not None:
+                route_nodes.append(int(found_node))
+
+        if not route_nodes and isinstance(route.get("stop_nodes"), list):
+            for raw_node in route.get("stop_nodes") or []:
+                try:
+                    node_val = int(raw_node)
+                except Exception:
+                    continue
+                if node_val < 0:
+                    continue
+                if len(coords_list) > 0 and node_val >= len(coords_list):
+                    continue
+                route_nodes.append(node_val)
+
+        total_distance = 0
+        total_time = 0
+        prev_node = 0
+        stop_times: List[Dict[str, Any]] = []
+
+        for node in route_nodes:
+            leg_dist = 0
+            leg_time = 0
+            if (
+                distances
+                and durations
+                and prev_node < len(distances)
+                and node < len(distances[prev_node])
+                and prev_node < len(durations)
+                and node < len(durations[prev_node])
+            ):
+                leg_dist = int(distances[prev_node][node] or 0)
+                leg_time = int(durations[prev_node][node] or 0)
+
+            if v_type == "truck":
+                leg_time = int(leg_time * truck_time_factor)
+                service_time = truck_service_time_s
+            else:
+                service_time = van_service_time_s
+
+            if node == 0:
+                service_time = reload_service_time_s
+
+            total_distance += leg_dist
+            total_time += leg_time
+            arrival_s = int(total_time)
+            total_time += service_time
+            departure_s = int(total_time)
+            stop_times.append(
+                {
+                    "arrival_s": arrival_s,
+                    "departure_s": departure_s,
+                    "arrival_hhmm": _seconds_to_hhmm_from_6am(arrival_s),
+                    "departure_hhmm": _seconds_to_hhmm_from_6am(departure_s),
+                }
+            )
+            prev_node = node
+
+        back_dist = 0
+        back_time = 0
+        if (
+            distances
+            and durations
+            and prev_node < len(distances)
+            and 0 < len(distances[prev_node])
+            and prev_node < len(durations)
+            and 0 < len(durations[prev_node])
+        ):
+            back_dist = int(distances[prev_node][0] or 0)
+            back_time = int(durations[prev_node][0] or 0)
+        if v_type == "truck":
+            back_time = int(back_time * truck_time_factor)
+
+        total_distance += back_dist
+        total_time += back_time
+
+        recalced.append(
+            {
+                "vehicle_id": route.get("vehicle_id"),
+                "vehicle_type": v_type,
+                "total_distance_m": int(total_distance),
+                "total_time_s": int(total_time),
+                "stop_nodes": route_nodes,
+                "stop_times": stop_times,
+            }
+        )
+
+        total_distance_all += int(total_distance)
+        total_duration_all += int(total_time)
+        total_stop_count += len(route_nodes)
+
+    return {
+        "routes": recalced,
+        "summary": {
+            "route_count": len(recalced),
+            "total_distance_m": int(total_distance_all),
+            "total_time_s": int(total_duration_all),
+            "total_stops": int(total_stop_count),
+            "delivery_nodes": int(len(node_by_delivery_id)),
+            "matrix_node_count": int(len(coords_list)),
+        },
+        "missing_delivery_coordinates": sorted(set(missing_delivery_coordinates)),
+    }
+
+
 def _parse_node_list(value: Any) -> List[int]:
     if value is None:
         return []

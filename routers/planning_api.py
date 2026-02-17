@@ -14,7 +14,12 @@ import uuid
 import threading
 
 from auth import get_current_user, hash_password
-from planning import debug_tomorrow_matrix, generate_tomorrow_plan, recalculate_tomorrow_plan
+from planning import (
+    debug_tomorrow_matrix,
+    generate_tomorrow_plan,
+    recalculate_manual_plan,
+    recalculate_tomorrow_plan,
+)
 from push_notifications import send_push_notification, tokens_for_identities
 from services import DatabaseService, MapboxService
 from config import settings
@@ -98,6 +103,12 @@ class PublishPlanRequest(BaseModel):
     @classmethod
     def _validate_plan_date(cls, value):
         return parse_iso_date(value, field_name="plan_date", allow_none=True)
+
+
+class ManualRecalculateRequest(BaseModel):
+    routes: list[dict] = Field(default_factory=list)
+    deliveries: list[dict] = Field(default_factory=list)
+    meta: dict | None = None
 
 
 class CustomStopPoint(BaseModel):
@@ -271,6 +282,25 @@ def plan_recalculate(payload: list[RecalculateRoute], request: Request):
     routes = [r.model_dump() for r in payload]
     force_refresh = _wants_refresh(request)
     resp = ok_response(request, recalculate_tomorrow_plan(routes, force_refresh=force_refresh))
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@router.post("/plan/manual/recalculate")
+def plan_manual_recalculate(payload: ManualRecalculateRequest, request: Request):
+    _require_manager_admin(request)
+    force_refresh = _wants_refresh(request)
+    meta = payload.meta or {}
+    depot_lat = meta.get("depot_lat") if isinstance(meta, dict) else None
+    depot_lon = meta.get("depot_lon") if isinstance(meta, dict) else None
+    result = recalculate_manual_plan(
+        routes=payload.routes or [],
+        deliveries=payload.deliveries or [],
+        depot_lat=depot_lat,
+        depot_lon=depot_lon,
+        force_refresh=force_refresh,
+    )
+    resp = ok_response(request, result)
     resp.headers["Cache-Control"] = "no-store"
     return resp
 
@@ -508,6 +538,54 @@ def _driver_identities_from_routes(routes: list[dict]) -> list[str]:
     return sorted(identities)
 
 
+def _route_metrics_summary(routes: list[dict]) -> dict[str, int]:
+    total_distance_m = 0
+    total_time_s = 0
+    total_stops = 0
+    for route in routes or []:
+        if not isinstance(route, dict):
+            continue
+        total_distance_m += _to_int_safe(route.get("total_distance_m"), 0)
+        total_time_s += _to_int_safe(route.get("total_time_s"), 0)
+        stops = route.get("stops")
+        if isinstance(stops, list):
+            total_stops += len(stops)
+    return {
+        "route_count": len([r for r in routes or [] if isinstance(r, dict)]),
+        "total_distance_m": int(total_distance_m),
+        "total_time_s": int(total_time_s),
+        "total_stops": int(total_stops),
+    }
+
+
+def _build_manual_seed_payload(svc: DatabaseService, plan_date: str, force_refresh: bool) -> Dict[str, Any]:
+    base = svc.build_delivery_plan_payload(plan_date, force_refresh=force_refresh)
+    deliveries = [_normalize_plan_delivery(d) for d in (base.get("deliveries") or [])]
+    return {
+        "plan_date": plan_date,
+        "plan_type": "manual",
+        "routes": [],
+        "deliveries": deliveries,
+        "meta": {
+            "source": "deliveries",
+            "plan_date": plan_date,
+            "depot_lat": settings.DEPOT_LAT,
+            "depot_lon": settings.DEPOT_LON,
+            "manual_metrics": {
+                "route_count": 0,
+                "total_distance_m": 0,
+                "total_time_s": 0,
+                "total_stops": 0,
+            },
+        },
+        "fleet": {"trucks": 0, "vans": 0},
+        "driver_profiles": [],
+        "status": "manual",
+        "updated_at": None,
+        "updated_by": None,
+    }
+
+
 @router.post("/plan/publish")
 def plan_publish(payload: PublishPlanRequest, request: Request):
     user = get_current_user(request)
@@ -592,6 +670,106 @@ def plan_publish(payload: PublishPlanRequest, request: Request):
             "stored_plan_blob": stored,
             "assignments": assignment_result,
             "storage_error": storage_error,
+        },
+    )
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@router.post("/plan/manual/save")
+def plan_manual_save(payload: PublishPlanRequest, request: Request):
+    user = _require_manager_admin(request)
+    plan_date = payload.plan_date or _business_date(offset_days=0)
+    force_refresh = _wants_refresh(request)
+
+    svc = DatabaseService()
+    normalized_deliveries = [_normalize_plan_delivery(d) for d in (payload.deliveries or [])]
+    normalized_routes, normalized_driver_profiles = _normalize_route_driver_profiles(
+        routes=payload.routes or [],
+        meta=payload.meta or {},
+        driver_profiles=payload.driver_profiles or [],
+        svc=svc,
+    )
+
+    recalc_result = recalculate_manual_plan(
+        routes=normalized_routes,
+        deliveries=normalized_deliveries,
+        depot_lat=(payload.meta or {}).get("depot_lat") if isinstance(payload.meta, dict) else None,
+        depot_lon=(payload.meta or {}).get("depot_lon") if isinstance(payload.meta, dict) else None,
+        force_refresh=force_refresh,
+    )
+    recalced_routes = recalc_result.get("routes") if isinstance(recalc_result, dict) else []
+    recalced_by_vehicle: Dict[str, Dict[str, Any]] = {}
+    for route_row in recalced_routes or []:
+        if not isinstance(route_row, dict):
+            continue
+        vehicle_key = _text_or_empty(route_row.get("vehicle_id"))
+        if vehicle_key:
+            recalced_by_vehicle[vehicle_key] = route_row
+
+    merged_routes: list[dict] = []
+    for route in normalized_routes:
+        if not isinstance(route, dict):
+            continue
+        item = dict(route)
+        vehicle_key = _text_or_empty(item.get("vehicle_id"))
+        update = recalced_by_vehicle.get(vehicle_key)
+        if update:
+            item["total_distance_m"] = update.get("total_distance_m")
+            item["total_time_s"] = update.get("total_time_s")
+            item["stop_times"] = update.get("stop_times") or []
+            item["stop_nodes"] = update.get("stop_nodes") or []
+        merged_routes.append(item)
+
+    summary = (
+        recalc_result.get("summary")
+        if isinstance(recalc_result, dict) and isinstance(recalc_result.get("summary"), dict)
+        else _route_metrics_summary(merged_routes)
+    )
+    missing_coordinates = (
+        recalc_result.get("missing_delivery_coordinates")
+        if isinstance(recalc_result, dict) and isinstance(recalc_result.get("missing_delivery_coordinates"), list)
+        else []
+    )
+
+    meta_payload: Dict[str, Any] = dict(payload.meta or {})
+    if meta_payload.get("depot_lat") is None:
+        meta_payload["depot_lat"] = settings.DEPOT_LAT
+    if meta_payload.get("depot_lon") is None:
+        meta_payload["depot_lon"] = settings.DEPOT_LON
+    meta_payload["plan_date"] = plan_date
+    meta_payload["manual_metrics"] = summary
+    if missing_coordinates:
+        meta_payload["missing_delivery_coordinates"] = missing_coordinates
+    else:
+        meta_payload.pop("missing_delivery_coordinates", None)
+
+    saved = svc.upsert_plan_payload(
+        plan_date=plan_date,
+        plan_type="manual",
+        fields={
+            "routes": merged_routes,
+            "deliveries": normalized_deliveries,
+            "meta": meta_payload,
+            "fleet": payload.fleet or {},
+            "driver_profiles": normalized_driver_profiles,
+            "status": "manual",
+            "updated_at": datetime.now(ZoneInfo("UTC")).isoformat(),
+            "updated_by": user.get("email") or user.get("name") or "manager/admin",
+        },
+    )
+
+    resp = ok_response(
+        request,
+        {
+            "ok": True,
+            "plan_date": plan_date,
+            "plan_type": "manual",
+            "record_id": f"{saved.get('plan_date')}::manual",
+            "manual_saved": True,
+            "summary": summary,
+            "missing_delivery_coordinates": missing_coordinates,
+            "routes": merged_routes,
         },
     )
     resp.headers["Cache-Control"] = "no-store"
@@ -974,6 +1152,80 @@ def plan_debug_matrix(
     return resp
 
 
+@router.get("/plan/manual")
+def plan_manual(request: Request, date: str | None = None):
+    _require_manager_admin(request)
+    plan_date = _require_iso_date_param(date, "date") if date else _business_date(offset_days=0)
+    svc = DatabaseService()
+    payload = svc.get_plan_payload(plan_date, "manual")
+    source = "manual_plans"
+    manual_saved = payload is not None
+    if not payload:
+        payload = _build_manual_seed_payload(svc, plan_date, force_refresh=_wants_refresh(request))
+        source = "deliveries"
+
+    normalized_deliveries = [_normalize_plan_delivery(d) for d in payload.get("deliveries") or []]
+    meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+    if meta.get("depot_lat") is None:
+        meta["depot_lat"] = settings.DEPOT_LAT
+    if meta.get("depot_lon") is None:
+        meta["depot_lon"] = settings.DEPOT_LON
+    if not isinstance(meta.get("manual_metrics"), dict):
+        meta["manual_metrics"] = _route_metrics_summary(payload.get("routes") or [])
+    payload["meta"] = meta
+
+    resp = ok_response(
+        request,
+        {
+            "plan_date": plan_date,
+            "plan_type": "manual",
+            "published": bool(manual_saved),
+            "manual_saved": bool(manual_saved),
+            "record_id": f"{plan_date}::manual",
+            "routes": payload.get("routes") or [],
+            "deliveries": normalized_deliveries,
+            "meta": meta,
+            "fleet": payload.get("fleet") or {},
+            "driver_profiles": payload.get("driver_profiles") or [],
+            "published_by": payload.get("updated_by"),
+            "status": payload.get("status"),
+            "updated_at": payload.get("updated_at"),
+            "created_at": payload.get("updated_at"),
+            "source": source,
+        },
+    )
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@router.get("/plan/manual/list")
+def plan_manual_list(request: Request):
+    _require_manager_admin(request)
+    svc = DatabaseService()
+    records = svc.list_published_plans(force_refresh=_wants_refresh(request), plan_type="manual")
+    items: list[dict[str, Any]] = []
+    for rec in records:
+        fields = rec.get("fields", {}) if isinstance(rec, dict) else {}
+        meta_raw = fields.get(settings.PUBLISHED_PLANS_META_FIELD)
+        meta = svc._json_load(meta_raw, {}) if meta_raw not in (None, "") else {}
+        summary = meta.get("manual_metrics") if isinstance(meta, dict) and isinstance(meta.get("manual_metrics"), dict) else {}
+        items.append(
+            {
+                "record_id": rec.get("id"),
+                "plan_date": fields.get(settings.PUBLISHED_PLANS_DATE_FIELD),
+                "plan_type": fields.get(settings.PUBLISHED_PLANS_TYPE_FIELD) or "manual",
+                "published_by": fields.get(settings.PUBLISHED_PLANS_PUBLISHED_BY_FIELD),
+                "status": fields.get(settings.PUBLISHED_PLANS_STATUS_FIELD),
+                "updated_at": fields.get(settings.PUBLISHED_PLANS_UPDATED_AT_FIELD),
+                "created_at": rec.get("createdTime"),
+                "summary": summary,
+            }
+        )
+    resp = ok_response(request, {"items": items})
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
 @router.get("/plan/published")
 def plan_published(request: Request, date: str | None = None):
     user = get_current_user(request)
@@ -1012,11 +1264,11 @@ def plan_published(request: Request, date: str | None = None):
             "fleet": payload.get("fleet") or {},
             "driver_profiles": payload.get("driver_profiles") or [],
             "published_by": payload.get("updated_by"),
-            "status": payload.get("status"),
-            "updated_at": payload.get("updated_at"),
-            "created_at": payload.get("updated_at"),
-            "source": source,
-        },
+                "status": payload.get("status") or "manual",
+                "updated_at": payload.get("updated_at"),
+                "created_at": payload.get("updated_at"),
+                "source": source,
+            },
     )
     resp.headers["Cache-Control"] = "no-store"
     return resp
