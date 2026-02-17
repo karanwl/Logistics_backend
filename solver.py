@@ -50,7 +50,7 @@ class RouteOptimizer:
         "van_service_time_s": 10 * 60,
         "shift_seconds": 8 * 3600,
         "waiting_slack_seconds": 600,
-        "search_time_limit_s": 30,
+        "search_time_limit_s": 60,
         "search_print_results": True,
     }
 
