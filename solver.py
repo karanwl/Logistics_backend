@@ -184,22 +184,7 @@ class RouteOptimizer:
         if truck_count <= 0:
             return 0
 
-        total_units = 0
-        for node in range(1, self.base_node_count):
-            tokens = self.node_to_jobs.get(node, [])
-            for t in tokens:
-                deliv_id, _, units = self._parse_token(t)
-                d = self.delivery_by_id.get(deliv_id) if deliv_id else None
-                pickup_flag = bool(self._delivery_field(d, "pickup", False)) if d else False
-                if pickup_flag:
-                    continue
-                if units:
-                    unit_val = int(units)
-                elif d:
-                    unit_val = self._delivery_units(d)
-                else:
-                    unit_val = 0
-                total_units += max(0, int(unit_val))
+        total_units = self._total_delivery_units()
 
         max_truck_capacity = int(truck_count * capacity)
         if total_units <= max_truck_capacity:
@@ -225,6 +210,25 @@ class RouteOptimizer:
                     else:
                         unit_val = 0
                     total_units += max(0, int(unit_val))
+        return int(total_units)
+
+    def _total_delivery_units(self) -> int:
+        total_units = 0
+        for node in range(1, self.base_node_count):
+            tokens = self.node_to_jobs.get(node, [])
+            for t in tokens:
+                deliv_id, _, units = self._parse_token(t)
+                d = self.delivery_by_id.get(deliv_id) if deliv_id else None
+                pickup_flag = bool(self._delivery_field(d, "pickup", False)) if d else False
+                if pickup_flag:
+                    continue
+                if units:
+                    unit_val = int(units)
+                elif d:
+                    unit_val = self._delivery_units(d)
+                else:
+                    unit_val = 0
+                total_units += max(0, int(unit_val))
         return int(total_units)
 
     def _append_depot_clone(self, matrix: list[list[int]]):
@@ -899,12 +903,16 @@ class RouteOptimizer:
     def solve(self, service_time=1200, max_route_time=43200):
         self._print_search("[solver] single-model solve started")
         total_trucks = sum(1 for v in self.vehicle_types if v == "truck")
-        total_units = self._total_truck_only_units()
+        total_units = self._total_delivery_units()
+        truck_only_units = self._total_truck_only_units()
         prefer_reload = total_units > int(self.reload_threshold_units or 0)
         preferred_physical_truck_count = min(self.physical_truck_count, 1) if prefer_reload else self.physical_truck_count
+        max_truck_capacity = int(max(0, total_trucks) * int(self.truck_capacity_units or 0))
         self._print_search(
             "[solver] reload check "
-            f"truck_only_units={total_units} "
+            f"total_delivery_units={total_units} "
+            f"truck_only_units={truck_only_units} "
+            f"max_truck_capacity={max_truck_capacity} "
             f"reload_threshold={int(self.reload_threshold_units or 0)} "
             f"prefer_reload={prefer_reload} "
             f"physical_trucks={self.physical_truck_count} "

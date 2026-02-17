@@ -79,7 +79,7 @@ class Settings(BaseModel):
     UPDATE_AIRTABLE_COORDS: bool = _env_bool("UPDATE_AIRTABLE_COORDS", "true")
     ALLOW_HOMEPAGE_CRUD: bool = _env_bool("ALLOW_HOMEPAGE_CRUD", "false")
 
-    BUSINESS_TZ: str = os.getenv("BUSINESS_TZ", "America/Toronto")
+    BUSINESS_TZ: str = os.getenv("BUSINESS_TZ", "UTC")
     BUSINESS_WEEKDAYS: str = os.getenv("BUSINESS_WEEKDAYS", "0,1,2,3,4")
     HOLIDAY_DATES: str = os.getenv("HOLIDAY_DATES", "")
     NEXT_DELIVERY_STRATEGY: str = os.getenv("NEXT_DELIVERY_STRATEGY", "business_day")

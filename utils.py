@@ -28,7 +28,7 @@ def to_int(value: str | int | float | None, default: int = 0) -> int:
 
 
 def business_date_iso(offset_days: int = 0) -> str:
-    tz = ZoneInfo(settings.BUSINESS_TZ)
+    tz = ZoneInfo("UTC")
     return (datetime.now(tz).date() + timedelta(days=offset_days)).isoformat()
 
 

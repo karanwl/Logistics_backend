@@ -1065,7 +1065,7 @@ class DatabaseService:
 
     @staticmethod
     def next_business_date(from_date: date | None = None) -> date:
-        tz = ZoneInfo(settings.BUSINESS_TZ)
+        tz = ZoneInfo("UTC")
         base = from_date or datetime.now(tz).date()
         start = base + timedelta(days=1)
         return DatabaseService._next_business_day(start)
@@ -1075,7 +1075,7 @@ class DatabaseService:
         return DatabaseService.next_business_date(from_date).isoformat()
 
     def _resolve_target_date(self, deliveries_records: list[Dict[str, Any]] | None = None) -> date:
-        tz = ZoneInfo(settings.BUSINESS_TZ)
+        tz = ZoneInfo("UTC")
         base_date = datetime.now(tz).date()
         start_date = base_date + timedelta(days=1)
         strategy = (settings.NEXT_DELIVERY_STRATEGY or "business_day").strip().lower()
@@ -1232,13 +1232,19 @@ class DatabaseService:
             if self._is_users_table(table_name):
                 user = User(email="")
                 self._apply_user_fields(user, fields)
+                now_utc = datetime.now(ZoneInfo("UTC"))
+                # Some deployments have NOT NULL timestamps without DB defaults.
+                if hasattr(user, "created_at") and getattr(user, "created_at", None) is None:
+                    user.created_at = now_utc
+                if hasattr(user, "updated_at") and getattr(user, "updated_at", None) is None:
+                    user.updated_at = now_utc
                 session.add(user)
                 session.commit()
                 session.refresh(user)
                 self._invalidate_cache(settings.USERS_TABLE)
                 return self._user_record(user)
             if self._is_published_plans_table(table_name):
-                plan_date = self._coerce_date(fields.get(settings.PUBLISHED_PLANS_DATE_FIELD)) or date.today()
+                plan_date = self._coerce_date(fields.get(settings.PUBLISHED_PLANS_DATE_FIELD)) or datetime.now(ZoneInfo("UTC")).date()
                 plan_type = self._normalize_plan_type(fields.get(settings.PUBLISHED_PLANS_TYPE_FIELD), default="published")
                 plan = PublishedPlan(plan_date=plan_date, plan_type=plan_type)
                 self._apply_plan_fields(plan, fields)
@@ -1902,7 +1908,7 @@ class DatabaseService:
     def list_live_route_rows(self, live_date: str | date | None = None, force_refresh: bool = False) -> List[Dict[str, Any]]:
         target_date = self._coerce_date(live_date)
         if not target_date:
-            target_date = datetime.now(ZoneInfo(settings.BUSINESS_TZ)).date()
+            target_date = datetime.now(ZoneInfo("UTC")).date()
 
         with SessionLocal() as session:
             if self._supports_live_views(session.bind):
@@ -2051,7 +2057,7 @@ class DatabaseService:
     def list_live_driver_progress(self, live_date: str | date | None = None, force_refresh: bool = False) -> List[Dict[str, Any]]:
         target_date = self._coerce_date(live_date)
         if not target_date:
-            target_date = datetime.now(ZoneInfo(settings.BUSINESS_TZ)).date()
+            target_date = datetime.now(ZoneInfo("UTC")).date()
 
         with SessionLocal() as session:
             if self._supports_live_views(session.bind):
@@ -2137,7 +2143,7 @@ class DatabaseService:
     def get_live_progress_snapshot(self, live_date: str | date | None = None, force_refresh: bool = False) -> Dict[str, Any]:
         target_date = self._coerce_date(live_date)
         if not target_date:
-            target_date = datetime.now(ZoneInfo(settings.BUSINESS_TZ)).date()
+            target_date = datetime.now(ZoneInfo("UTC")).date()
 
         route_rows = self.list_live_route_rows(target_date, force_refresh=force_refresh)
         delivery_to_route_key, published_route_meta = self._published_vehicle_delivery_lookup(target_date)
@@ -2823,8 +2829,8 @@ class DatabaseService:
                     box=box,
                     lat=float(lat or 0.0),
                     lon=float(lon or 0.0),
-                    window_start=fields.get("Window Start"),
-                    window_end=fields.get("Window End"),
+                    window_start=self._format_time_value(fields.get("Window Start")),
+                    window_end=self._format_time_value(fields.get("Window End")),
                 )
             )
 
