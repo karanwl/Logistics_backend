@@ -1201,6 +1201,17 @@ class DatabaseService:
                     )
                     continue
 
+                pickup_vehicle = self._normalize_pickup_vehicle(getattr(delivery, "pickup_vehicle", None))
+                pickup_flag = bool(getattr(delivery, "pickup", False))
+                if pickup_flag and not pickup_vehicle:
+                    pickup_vehicle = "both"
+                elif not pickup_flag:
+                    pickup_vehicle = ""
+                normalized_pickup_vehicle = pickup_vehicle or None
+                if getattr(delivery, "pickup_vehicle", None) != normalized_pickup_vehicle:
+                    delivery.pickup_vehicle = normalized_pickup_vehicle
+                    changed = True
+
                 if changed:
                     if hasattr(delivery, "updated_at"):
                         delivery.updated_at = datetime.now(ZoneInfo("UTC"))
@@ -1306,6 +1317,8 @@ class DatabaseService:
                     pickup_vehicle = self._normalize_pickup_vehicle(getattr(delivery, "pickup_vehicle", None))
                     if bool(getattr(delivery, "pickup", False)) and not pickup_vehicle:
                         pickup_vehicle = "both"
+                    elif not bool(getattr(delivery, "pickup", False)):
+                        pickup_vehicle = ""
                     delivery.pickup_vehicle = pickup_vehicle or None
                 if hasattr(delivery, "custom_stop") and getattr(delivery, "custom_stop", None) is None:
                     delivery.custom_stop = False
@@ -1359,6 +1372,13 @@ class DatabaseService:
                 return self._jobsite_record(rec)
             if self._is_deliveries_table(table_name):
                 self._apply_delivery_fields(rec, fields)
+                if hasattr(rec, "pickup_vehicle"):
+                    pickup_vehicle = self._normalize_pickup_vehicle(getattr(rec, "pickup_vehicle", None))
+                    if bool(getattr(rec, "pickup", False)) and not pickup_vehicle:
+                        pickup_vehicle = "both"
+                    elif not bool(getattr(rec, "pickup", False)):
+                        pickup_vehicle = ""
+                    rec.pickup_vehicle = pickup_vehicle or None
                 if hasattr(rec, "updated_at"):
                     rec.updated_at = datetime.now(ZoneInfo("UTC"))
                 session.commit()
