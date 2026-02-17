@@ -672,7 +672,6 @@ class RouteOptimizer:
         # ---------------------------
         TRUCK_COST_FACTOR = float(self.costs["truck_cost_factor"])
         TRUCK_TIME_FACTOR = float(self.costs["truck_time_factor"])
-        TRUCK_SERVE_VAN_ELIGIBLE_PENALTY = int(self.costs["truck_serve_van_eligible_penalty"])
         TRUCK_SERVICE_TIME = int(self.costs["truck_service_time_s"])
         VAN_SERVICE_TIME = int(self.costs["van_service_time_s"])
 
@@ -686,8 +685,6 @@ class RouteOptimizer:
                     return base
 
                 scaled = int(base * TRUCK_COST_FACTOR)
-                if to_node != self.depot and van_eligible[to_node]:
-                    scaled += TRUCK_SERVE_VAN_ELIGIBLE_PENALTY
                 return scaled
             return cost_cb
 

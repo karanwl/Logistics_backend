@@ -72,6 +72,17 @@ def _vehicle_capacity_units() -> int:
     return max_long * _med_skid_units()
 
 
+def _to_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    if isinstance(value, (int, float)):
+        return value != 0
+    raw = str(value).strip().lower()
+    return raw in {"true", "1", "yes", "y", "checked"}
+
+
 def delivery_capacity_units(d) -> int:
     """
     Normalize mixed cargo into a single capacity unit system.
@@ -95,6 +106,141 @@ def delivery_capacity_units(d) -> int:
         + ((frame_qty + exp_frame_qty) * _frame_units())
     )
     return max(0, int(units))
+
+
+def _delivery_value(delivery: Any, key: str, default: Any = None) -> Any:
+    if isinstance(delivery, dict):
+        return delivery.get(key, default)
+    return getattr(delivery, key, default)
+
+
+def _normalize_pickup_vehicle(value: Any) -> str:
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return ""
+    if raw in {"van", "vans", "van-only", "van only", "van_only"}:
+        return "van"
+    if raw in {"truck", "trucks", "truck-only", "truck only", "truck_only"}:
+        return "truck"
+    if raw in {"both", "any", "either", "all", "van/truck", "truck/van"}:
+        return "both"
+    return ""
+
+
+def _parse_token_item_counts(token: str) -> Dict[str, int] | None:
+    def _parse_field(field: str) -> int | None:
+        key = f"_{field}"
+        if key not in token:
+            return None
+        try:
+            value = token.split(key, 1)[1].split("_", 1)[0]
+            return max(0, int(value))
+        except (TypeError, ValueError, IndexError):
+            return None
+
+    fields = ["Med", "Large", "Small", "Frame", "Exp", "Door", "Box"]
+    out: Dict[str, int] = {}
+    found = False
+    for field in fields:
+        parsed = _parse_field(field)
+        if parsed is not None:
+            found = True
+            out[field.lower()] = parsed
+        else:
+            out[field.lower()] = 0
+    return out if found else None
+
+
+def _node_requires_truck_for_tokens(tokens: List[str], delivery_by_id: Dict[str, Any]) -> bool:
+    van_only = False
+    truck_only = False
+    door_total = 0
+    frame_total = 0
+    exp_frame_total = 0
+    skid_present = False
+    total_units = 0
+    has_delivery = False
+
+    for raw_token in tokens or []:
+        token = str(raw_token).strip()
+        if not token or token.lower() in {"depot", "depot - reload"}:
+            continue
+        delivery_id = token.split("_Part", 1)[0].strip()
+        delivery = delivery_by_id.get(delivery_id)
+        if delivery is None:
+            return True
+
+        has_delivery = True
+        if _to_bool(_delivery_value(delivery, "requires_truck", False)):
+            return True
+
+        pickup = _to_bool(_delivery_value(delivery, "pickup", False))
+        if pickup:
+            if _to_bool(_delivery_value(delivery, "requires_empty_truck", False)):
+                truck_only = True
+            pickup_vehicle = _normalize_pickup_vehicle(_delivery_value(delivery, "pickup_vehicle", ""))
+            if pickup_vehicle == "van":
+                van_only = True
+            elif pickup_vehicle == "truck":
+                truck_only = True
+
+        token_counts = _parse_token_item_counts(token)
+        if token_counts:
+            med_qty = int(token_counts.get("med", 0) or 0)
+            large_qty = int(token_counts.get("large", 0) or 0)
+            small_qty = int(token_counts.get("small", 0) or 0)
+            frame_qty = int(token_counts.get("frame", 0) or 0)
+            exp_qty = int(token_counts.get("exp", 0) or 0)
+            door_qty = int(token_counts.get("door", 0) or 0)
+        else:
+            med_qty = int(_delivery_value(delivery, "med_skid", _delivery_value(delivery, "skid", 0)) or 0)
+            large_qty = int(_delivery_value(delivery, "large_skid", 0) or 0)
+            small_qty = int(_delivery_value(delivery, "small_skid", 0) or 0)
+            frame_qty = int(_delivery_value(delivery, "frame", 0) or 0)
+            exp_qty = int(_delivery_value(delivery, "exp_frame", 0) or 0)
+            door_qty = int(_delivery_value(delivery, "door", 0) or 0)
+
+        if med_qty > 0 or large_qty > 0 or small_qty > 0:
+            skid_present = True
+        door_total += door_qty
+        frame_total += frame_qty
+        exp_frame_total += exp_qty
+        total_units += (
+            (med_qty * _med_skid_units())
+            + (large_qty * _large_skid_units())
+            + (small_qty * _small_skid_units())
+            + ((frame_qty + exp_qty) * _frame_units())
+        )
+
+    if not has_delivery:
+        return True
+    if truck_only:
+        return True
+    if van_only and not truck_only:
+        return False
+    if skid_present and (door_total > 0 or frame_total > 0 or exp_frame_total > 0):
+        return True
+    if (
+        door_total > int(getattr(RouteOptimizer, "VAN_DOOR_LIMIT", 3))
+        or frame_total > int(getattr(RouteOptimizer, "VAN_FRAME_LIMIT", 3))
+        or exp_frame_total > int(getattr(RouteOptimizer, "VAN_EXP_FRAME_LIMIT", 10))
+    ):
+        return True
+
+    van_capacity_units = int(getattr(settings, "VAN_CAPACITY_UNITS", RouteOptimizer.VAN_CAPACITY_UNITS) or 0)
+    if van_capacity_units <= 0:
+        return total_units > 0
+    return total_units > van_capacity_units
+
+
+def _build_node_van_eligibility(node_to_tokens: Dict[int, List[str]], delivery_by_id: Dict[str, Any]) -> Dict[int, bool]:
+    node_van_eligible: Dict[int, bool] = {}
+    for node_idx, tokens in (node_to_tokens or {}).items():
+        if int(node_idx) == 0:
+            continue
+        requires_truck = _node_requires_truck_for_tokens(tokens or [], delivery_by_id)
+        node_van_eligible[int(node_idx)] = not requires_truck
+    return node_van_eligible
 
 
 def _geocode_missing(deliveries, db: DatabaseService, mapbox: MapboxService):
@@ -622,7 +768,10 @@ def recalculate_tomorrow_plan(routes: List[Dict[str, Any]], force_refresh: bool 
         return {"routes": [], "message": "No deliveries found."}
 
     geocode_failures = _geocode_missing(deliveries, db, mapbox)
-    coords_list, _node_to_jobs = _build_nodes_and_coords(deliveries)
+    coords_list, node_to_jobs = _build_nodes_and_coords(deliveries)
+
+    delivery_by_id = {str(getattr(d, "id", "")).strip(): d for d in deliveries if str(getattr(d, "id", "")).strip()}
+    node_van_eligible = _build_node_van_eligibility(node_to_jobs, delivery_by_id)
 
     if len(coords_list) <= 1:
         return {"routes": [], "message": "No valid delivery locations to route."}
@@ -671,7 +820,10 @@ def recalculate_tomorrow_plan(routes: List[Dict[str, Any]], force_refresh: bool 
 
             if v_type == "truck":
                 leg_time = int(leg_time * TRUCK_TIME_FACTOR)
-                svc = TRUCK_SERVICE_TIME
+                if node != 0 and node_van_eligible.get(node, False):
+                    svc = VAN_SERVICE_TIME
+                else:
+                    svc = TRUCK_SERVICE_TIME
             else:
                 svc = VAN_SERVICE_TIME
 
@@ -777,6 +929,22 @@ def recalculate_manual_plan(
             coords_list.append((float(lon), float(lat)))
             coord_node_index[coord_key] = node_idx
         node_by_delivery_id[delivery_id] = node_idx
+
+    manual_delivery_by_id: Dict[str, Dict[str, Any]] = {}
+    node_to_tokens: Dict[int, List[str]] = {}
+    for item in deliveries or []:
+        if not isinstance(item, dict):
+            continue
+        delivery_id = str(item.get("id") or item.get("delivery_id") or "").strip()
+        if not delivery_id:
+            continue
+        manual_delivery_by_id[delivery_id] = item
+        node_idx = node_by_delivery_id.get(delivery_id)
+        if node_idx is None:
+            continue
+        node_to_tokens.setdefault(int(node_idx), []).append(delivery_id)
+
+    node_van_eligible = _build_node_van_eligibility(node_to_tokens, manual_delivery_by_id)
 
     distances: List[List[float]] = []
     durations: List[List[float]] = []
@@ -888,7 +1056,10 @@ def recalculate_manual_plan(
 
             if v_type == "truck":
                 leg_time = int(leg_time * truck_time_factor)
-                service_time = truck_service_time_s
+                if node != 0 and node_van_eligible.get(node, False):
+                    service_time = van_service_time_s
+                else:
+                    service_time = truck_service_time_s
             else:
                 service_time = van_service_time_s
 
