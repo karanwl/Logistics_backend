@@ -25,7 +25,7 @@ from services import DatabaseService, MapboxService
 from config import settings
 from security import csrf_protect
 
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 from responses import ok_response
 from utils import business_date_iso, next_plan_date_iso, parse_sales_order, parse_iso_date, to_int
@@ -35,6 +35,7 @@ logger = logging.getLogger(__name__)
 
 _solve_jobs_lock = threading.Lock()
 _solve_jobs: dict[str, dict[str, Any]] = {}
+_DASHBOARD_VEHICLE_TYPES = {"all", "truck", "van"}
 
 
 def _wants_refresh(request: Request) -> bool:
@@ -621,6 +622,186 @@ def _route_metrics_summary(routes: list[dict]) -> dict[str, int]:
         "total_time_s": int(total_time_s),
         "total_stops": int(total_stops),
     }
+
+
+def _route_vehicle_type(route: dict) -> str:
+    raw = _text_or_empty(
+        route.get("vehicle_type") or route.get("v_type") or route.get("vehicleType")
+    ).lower()
+    return "van" if raw == "van" else "truck"
+
+
+def _delivery_id_from_stop_item(item: Any) -> str:
+    if isinstance(item, dict):
+        stop_type = _text_or_empty(item.get("type")).lower()
+        if stop_type == "depot":
+            return ""
+        delivery_id = _text_or_empty(item.get("id") or item.get("delivery_id"))
+        if stop_type == "delivery":
+            return delivery_id
+        if delivery_id:
+            return delivery_id
+        label = _text_or_empty(item.get("label")).lower()
+        if label in {"depot", "depot - reload"}:
+            return ""
+        return ""
+    token = _text_or_empty(item)
+    if not token:
+        return ""
+    lowered = token.lower()
+    if lowered in {"depot", "depot - reload"}:
+        return ""
+    return token.split("_Part", 1)[0].strip()
+
+
+def _empty_dashboard_metrics() -> Dict[str, int]:
+    return {
+        "route_count": 0,
+        "vehicle_count": 0,
+        "delivery_count": 0,
+        "total_distance_m": 0,
+        "total_time_s": 0,
+        "total_stops": 0,
+        "delivery_stops": 0,
+    }
+
+
+def _sum_dashboard_metrics(base: dict[str, int], add: dict[str, int]) -> dict[str, int]:
+    out = _empty_dashboard_metrics()
+    for key in out.keys():
+        out[key] = int(_to_int_safe(base.get(key), 0) + _to_int_safe(add.get(key), 0))
+    return out
+
+
+def _delta_dashboard_metrics(
+    manual_metrics: dict[str, int],
+    published_metrics: dict[str, int],
+) -> dict[str, int]:
+    out = _empty_dashboard_metrics()
+    for key in out.keys():
+        out[key] = int(_to_int_safe(published_metrics.get(key), 0) - _to_int_safe(manual_metrics.get(key), 0))
+    return out
+
+
+def _plan_dashboard_metrics(routes: list[dict], vehicle_type: str = "all") -> dict[str, int]:
+    out = _empty_dashboard_metrics()
+    if vehicle_type not in _DASHBOARD_VEHICLE_TYPES:
+        vehicle_type = "all"
+
+    unique_delivery_ids: set[str] = set()
+    filtered_routes: list[dict] = []
+    for route in routes or []:
+        if not isinstance(route, dict):
+            continue
+        route_vehicle_type = _route_vehicle_type(route)
+        if vehicle_type != "all" and route_vehicle_type != vehicle_type:
+            continue
+        filtered_routes.append(route)
+
+    out["route_count"] = len(filtered_routes)
+    out["vehicle_count"] = len(filtered_routes)
+
+    total_distance_m = 0
+    total_time_s = 0
+    total_stops = 0
+    delivery_stops = 0
+
+    for route in filtered_routes:
+        total_distance_m += _to_int_safe(route.get("total_distance_m"), 0)
+        total_time_s += _to_int_safe(route.get("total_time_s"), 0)
+        stops = route.get("stops")
+        if not isinstance(stops, list):
+            continue
+        total_stops += len(stops)
+        for stop in stops:
+            stop_group = stop if isinstance(stop, list) else [stop]
+            group_has_delivery = False
+            for stop_item in stop_group:
+                delivery_id = _delivery_id_from_stop_item(stop_item)
+                if not delivery_id:
+                    continue
+                group_has_delivery = True
+                unique_delivery_ids.add(delivery_id)
+            if group_has_delivery:
+                delivery_stops += 1
+
+    out["total_distance_m"] = int(total_distance_m)
+    out["total_time_s"] = int(total_time_s)
+    out["total_stops"] = int(total_stops)
+    out["delivery_stops"] = int(delivery_stops)
+    out["delivery_count"] = len(unique_delivery_ids)
+    return out
+
+
+def _safe_pct_delta(value: int, base: int) -> float:
+    if base <= 0:
+        return 0.0
+    return round((float(value) / float(base)) * 100.0, 2)
+
+
+def _dashboard_improvements(
+    manual_metrics: dict[str, int],
+    published_metrics: dict[str, int],
+    compared_days: int,
+) -> dict[str, Any]:
+    distance_saved_m = int(_to_int_safe(manual_metrics.get("total_distance_m"), 0) - _to_int_safe(published_metrics.get("total_distance_m"), 0))
+    time_saved_s = int(_to_int_safe(manual_metrics.get("total_time_s"), 0) - _to_int_safe(published_metrics.get("total_time_s"), 0))
+    routes_saved = int(_to_int_safe(manual_metrics.get("route_count"), 0) - _to_int_safe(published_metrics.get("route_count"), 0))
+    vehicles_saved = int(_to_int_safe(manual_metrics.get("vehicle_count"), 0) - _to_int_safe(published_metrics.get("vehicle_count"), 0))
+
+    manual_distance = int(_to_int_safe(manual_metrics.get("total_distance_m"), 0))
+    manual_time = int(_to_int_safe(manual_metrics.get("total_time_s"), 0))
+    day_divisor = max(1, _to_int_safe(compared_days, 0))
+
+    return {
+        "distance_saved_m": distance_saved_m,
+        "distance_saved_pct": _safe_pct_delta(distance_saved_m, manual_distance),
+        "time_saved_s": time_saved_s,
+        "time_saved_pct": _safe_pct_delta(time_saved_s, manual_time),
+        "routes_saved": routes_saved,
+        "vehicles_saved": vehicles_saved,
+        "daily_distance_saved_m": int(round(distance_saved_m / day_divisor)),
+        "daily_time_saved_s": int(round(time_saved_s / day_divisor)),
+    }
+
+
+def _dashboard_highlights(improvements: dict[str, Any], compared_days: int) -> list[str]:
+    if compared_days <= 0:
+        return ["No overlapping manual and published plans were found in the selected timeframe."]
+
+    distance_saved_m = _to_int_safe(improvements.get("distance_saved_m"), 0)
+    time_saved_s = _to_int_safe(improvements.get("time_saved_s"), 0)
+    routes_saved = _to_int_safe(improvements.get("routes_saved"), 0)
+
+    distance_km = abs(distance_saved_m) / 1000.0
+    distance_pct = float(improvements.get("distance_saved_pct") or 0.0)
+    time_hours = abs(time_saved_s) / 3600.0
+    time_pct = float(improvements.get("time_saved_pct") or 0.0)
+
+    highlights: list[str] = []
+    if distance_saved_m >= 0:
+        highlights.append(
+            f"Distance reduced by {distance_km:.1f} km ({distance_pct:.2f}%) over {compared_days} compared day(s)."
+        )
+    else:
+        highlights.append(
+            f"Distance increased by {distance_km:.1f} km ({abs(distance_pct):.2f}%) over {compared_days} compared day(s)."
+        )
+
+    if time_saved_s >= 0:
+        highlights.append(
+            f"Route time reduced by {time_hours:.1f} hours ({time_pct:.2f}%)."
+        )
+    else:
+        highlights.append(
+            f"Route time increased by {time_hours:.1f} hours ({abs(time_pct):.2f}%)."
+        )
+
+    if routes_saved >= 0:
+        highlights.append(f"Used {routes_saved} fewer route(s) in total across the timeframe.")
+    else:
+        highlights.append(f"Used {abs(routes_saved)} more route(s) in total across the timeframe.")
+    return highlights
 
 
 def _capacity_profile_payload() -> Dict[str, int]:
@@ -1713,6 +1894,137 @@ def plan_published_list(request: Request):
                 }
             )
     resp = ok_response(request, {"items": items})
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@router.get("/plan/dashboard")
+def plan_dashboard(
+    request: Request,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    vehicle_type: str = "all",
+):
+    _require_manager_admin(request)
+
+    normalized_vehicle_type = _text_or_empty(vehicle_type).lower() or "all"
+    if normalized_vehicle_type not in _DASHBOARD_VEHICLE_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"vehicle_type must be one of: {', '.join(sorted(_DASHBOARD_VEHICLE_TYPES))}.",
+        )
+
+    selected_end = _require_iso_date_param(end_date, "end_date") if end_date else _business_date(offset_days=0)
+    if start_date:
+        selected_start = _require_iso_date_param(start_date, "start_date")
+    else:
+        selected_start = (date.fromisoformat(selected_end) - timedelta(days=29)).isoformat()
+
+    start_dt = date.fromisoformat(selected_start)
+    end_dt = date.fromisoformat(selected_end)
+    if start_dt > end_dt:
+        raise HTTPException(status_code=400, detail="start_date must be on or before end_date.")
+
+    range_days = (end_dt - start_dt).days + 1
+    max_range_days = int(getattr(settings, "DASHBOARD_MAX_RANGE_DAYS", 366) or 366)
+    if range_days > max_range_days:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Date range too large ({range_days} days). Max supported range is {max_range_days} days.",
+        )
+
+    svc = DatabaseService()
+    manual_meta = svc.list_plan_meta("manual")
+    published_meta = svc.list_plan_meta("published")
+
+    def _date_in_range(value: str) -> bool:
+        return selected_start <= value <= selected_end
+
+    manual_dates = {
+        str(item.get("plan_date") or "").strip()
+        for item in manual_meta or []
+        if str(item.get("plan_date") or "").strip() and _date_in_range(str(item.get("plan_date") or "").strip())
+    }
+    published_dates = {
+        str(item.get("plan_date") or "").strip()
+        for item in published_meta or []
+        if str(item.get("plan_date") or "").strip() and _date_in_range(str(item.get("plan_date") or "").strip())
+    }
+
+    compared_dates = sorted(manual_dates & published_dates)
+    manual_only_dates = sorted(manual_dates - published_dates)
+    published_only_dates = sorted(published_dates - manual_dates)
+
+    totals_manual = _empty_dashboard_metrics()
+    totals_published = _empty_dashboard_metrics()
+    timeline: list[dict[str, Any]] = []
+    effective_compared_dates: list[str] = []
+
+    for plan_date in compared_dates:
+        manual_payload = svc.get_plan_payload(plan_date, "manual")
+        published_payload = svc.get_plan_payload(plan_date, "published")
+        if not manual_payload or not published_payload:
+            continue
+
+        manual_routes = _normalize_manual_routes_shape(manual_payload.get("routes") or [])
+        published_routes_raw = published_payload.get("routes")
+        published_routes = published_routes_raw if isinstance(published_routes_raw, list) else []
+
+        manual_metrics = _plan_dashboard_metrics(manual_routes, vehicle_type=normalized_vehicle_type)
+        published_metrics = _plan_dashboard_metrics(published_routes, vehicle_type=normalized_vehicle_type)
+        delta_metrics = _delta_dashboard_metrics(manual_metrics, published_metrics)
+        day_improvements = _dashboard_improvements(manual_metrics, published_metrics, 1)
+
+        totals_manual = _sum_dashboard_metrics(totals_manual, manual_metrics)
+        totals_published = _sum_dashboard_metrics(totals_published, published_metrics)
+        effective_compared_dates.append(plan_date)
+
+        timeline.append(
+            {
+                "date": plan_date,
+                "manual": manual_metrics,
+                "published": published_metrics,
+                "delta_published_minus_manual": delta_metrics,
+                "improvements": day_improvements,
+            }
+        )
+
+    totals_delta = _delta_dashboard_metrics(totals_manual, totals_published)
+    totals_improvements = _dashboard_improvements(
+        totals_manual,
+        totals_published,
+        len(effective_compared_dates),
+    )
+
+    covered_dates = manual_dates | published_dates
+    coverage = {
+        "range_days": int(range_days),
+        "manual_dates": len(manual_dates),
+        "published_dates": len(published_dates),
+        "compared_dates": len(effective_compared_dates),
+        "manual_only_dates": len(manual_only_dates),
+        "published_only_dates": len(published_only_dates),
+        "empty_dates": max(0, int(range_days) - len(covered_dates)),
+        "compared_date_list": effective_compared_dates,
+        "manual_only_date_list": manual_only_dates,
+        "published_only_date_list": published_only_dates,
+    }
+
+    payload = {
+        "start_date": selected_start,
+        "end_date": selected_end,
+        "vehicle_type": normalized_vehicle_type,
+        "coverage": coverage,
+        "totals": {
+            "manual": totals_manual,
+            "published": totals_published,
+            "delta_published_minus_manual": totals_delta,
+            "improvements": totals_improvements,
+        },
+        "timeline": timeline,
+        "highlights": _dashboard_highlights(totals_improvements, len(effective_compared_dates)),
+    }
+    resp = ok_response(request, payload)
     resp.headers["Cache-Control"] = "no-store"
     return resp
 
