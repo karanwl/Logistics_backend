@@ -916,6 +916,8 @@ class DatabaseService:
                 jobsite.name = self._first_str(value)
             elif key == settings.JOBSITES_ADDRESS_FIELD:
                 jobsite.address = self._first_str(value) if value not in (None, "") else None
+            elif key in {"Active", "active"}:
+                jobsite.active = self._to_bool(value)
             elif key == settings.JOBSITES_LAT_FIELD:
                 jobsite.latitude = self._coerce_float(value)
             elif key == settings.JOBSITES_LON_FIELD:
@@ -1274,6 +1276,8 @@ class DatabaseService:
             if self._is_jobsites_table(table_name):
                 jobsite = Jobsite(name="")
                 self._apply_jobsite_fields(jobsite, fields)
+                if hasattr(jobsite, "active") and getattr(jobsite, "active", None) is None:
+                    jobsite.active = True
                 session.add(jobsite)
                 session.commit()
                 session.refresh(jobsite)
