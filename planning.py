@@ -1,13 +1,9 @@
-import logging
 import math
 from typing import Any, Dict, List, Tuple
 
 from config import settings
 from services import DatabaseService, MapboxService
 from solver import RouteOptimizer
-
-logger = logging.getLogger(__name__)
-
 
 def haversine_km(lon1, lat1, lon2, lat2):
     R = 6371.0
@@ -785,44 +781,17 @@ def recalculate_manual_plan(
     distances: List[List[float]] = []
     durations: List[List[float]] = []
 
-    def _build_haversine_matrix(coords: List[Tuple[float, float]]) -> Tuple[List[List[float]], List[List[float]]]:
-        speed_mps = max(1.0, float(getattr(settings, "MANUAL_RECALC_FALLBACK_SPEED_MPS", 11.11) or 11.11))
-        size = len(coords)
-        dist_rows = [[0.0 for _ in range(size)] for _ in range(size)]
-        dur_rows = [[0.0 for _ in range(size)] for _ in range(size)]
-        for i in range(size):
-            lon1, lat1 = coords[i]
-            for j in range(size):
-                if i == j:
-                    continue
-                lon2, lat2 = coords[j]
-                dist_m = haversine_km(float(lon1), float(lat1), float(lon2), float(lat2)) * 1000.0
-                dist_rows[i][j] = float(dist_m)
-                dur_rows[i][j] = float(dist_m / speed_mps)
-        return dist_rows, dur_rows
-
     if len(coords_list) >= 2:
         matrix_max_coords = int(getattr(settings, "MANUAL_RECALC_MATRIX_MAX_COORDS", 25) or 25)
         if len(coords_list) > matrix_max_coords:
-            logger.warning(
-                "Manual recalc matrix nodes exceed limit (nodes=%s, limit=%s); using haversine fallback.",
-                len(coords_list),
-                matrix_max_coords,
+            raise ValueError(
+                "Manual recalculation exceeds Mapbox Matrix limit: "
+                f"{len(coords_list)} coordinates (max {matrix_max_coords}). "
+                "Split routes or reduce unique stops."
             )
-            distances, durations = _build_haversine_matrix(coords_list)
-        else:
-            try:
-                matrix = mapbox.get_matrix(coords_list, force_refresh=force_refresh)
-                distances = matrix.get("distances", []) or []
-                durations = matrix.get("durations", []) or []
-            except Exception as exc:
-                # Graceful fallback so manual recalc never hard-fails.
-                logger.warning(
-                    "Manual recalc matrix request failed; using haversine fallback (nodes=%s, error=%s)",
-                    len(coords_list),
-                    exc,
-                )
-                distances, durations = _build_haversine_matrix(coords_list)
+        matrix = mapbox.get_matrix(coords_list, force_refresh=force_refresh)
+        distances = matrix.get("distances", []) or []
+        durations = matrix.get("durations", []) or []
 
     truck_time_factor = 1.10
     truck_service_time_s = 30 * 60

@@ -293,13 +293,16 @@ def plan_manual_recalculate(payload: ManualRecalculateRequest, request: Request)
     meta = payload.meta or {}
     depot_lat = meta.get("depot_lat") if isinstance(meta, dict) else None
     depot_lon = meta.get("depot_lon") if isinstance(meta, dict) else None
-    result = recalculate_manual_plan(
-        routes=payload.routes or [],
-        deliveries=payload.deliveries or [],
-        depot_lat=depot_lat,
-        depot_lon=depot_lon,
-        force_refresh=force_refresh,
-    )
+    try:
+        result = recalculate_manual_plan(
+            routes=payload.routes or [],
+            deliveries=payload.deliveries or [],
+            depot_lat=depot_lat,
+            depot_lon=depot_lon,
+            force_refresh=force_refresh,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     resp = ok_response(request, result)
     resp.headers["Cache-Control"] = "no-store"
     return resp
@@ -977,6 +980,7 @@ def _recalculate_manual_routes(
     depot_lat: Any,
     depot_lon: Any,
     force_refresh: bool,
+    strict: bool = False,
 ) -> tuple[list[dict], dict[str, int], list[str]]:
     if not routes:
         return [], _route_metrics_summary([]), []
@@ -990,6 +994,8 @@ def _recalculate_manual_routes(
             force_refresh=force_refresh,
         )
     except Exception:
+        if strict:
+            raise
         logger.warning("Manual route recalculation failed; preserving existing route timings.", exc_info=True)
         return routes, _route_metrics_summary(routes), []
 
@@ -1159,6 +1165,7 @@ def plan_manual_save(payload: PublishPlanRequest, request: Request):
         depot_lat=(payload.meta or {}).get("depot_lat") if isinstance(payload.meta, dict) else None,
         depot_lon=(payload.meta or {}).get("depot_lon") if isinstance(payload.meta, dict) else None,
         force_refresh=force_refresh,
+        strict=True,
     )
 
     meta_payload = _build_manual_meta_payload(
