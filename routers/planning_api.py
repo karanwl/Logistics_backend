@@ -322,6 +322,15 @@ def _to_int_safe(value: Any, default: int = 0) -> int:
         return default
 
 
+def _to_float_safe(value: Any) -> float | None:
+    try:
+        if value in (None, ""):
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _require_iso_date_param(value: str | None, field_name: str) -> str:
     try:
         return parse_iso_date(value, field_name=field_name, allow_none=False)
@@ -361,6 +370,59 @@ def _normalize_plan_delivery(item: Any) -> Dict[str, Any]:
             d.get(field, 0) > 0 for field in ("med_skid", "large_skid", "small_skid", "door", "frame", "exp_frame")
         )
     return d
+
+
+def _has_valid_coordinates(item: Dict[str, Any]) -> bool:
+    lat = _to_float_safe(item.get("lat"))
+    lon = _to_float_safe(item.get("lon"))
+    if lat is None or lon is None:
+        return False
+    if abs(lat) < 1e-9 and abs(lon) < 1e-9:
+        return False
+    return True
+
+
+def _enrich_plan_delivery_coordinates(
+    svc: DatabaseService,
+    plan_date: str,
+    deliveries: list[dict],
+    force_refresh: bool,
+) -> list[dict]:
+    if not deliveries:
+        return deliveries
+    missing_ids = {
+        str(item.get("id") or item.get("delivery_id") or "").strip()
+        for item in deliveries
+        if isinstance(item, dict) and not _has_valid_coordinates(item)
+    }
+    missing_ids.discard("")
+    if not missing_ids:
+        return deliveries
+
+    base = svc.build_delivery_plan_payload(plan_date, force_refresh=force_refresh)
+    base_lookup: Dict[str, Dict[str, Any]] = {}
+    for item in base.get("deliveries") or []:
+        if not isinstance(item, dict):
+            continue
+        key = str(item.get("id") or item.get("delivery_id") or "").strip()
+        if key:
+            base_lookup[key] = item
+
+    enriched: list[dict] = []
+    for item in deliveries:
+        if not isinstance(item, dict):
+            enriched.append(item)
+            continue
+        key = str(item.get("id") or item.get("delivery_id") or "").strip()
+        if key and key in missing_ids and key in base_lookup:
+            base_item = base_lookup[key]
+            next_item = dict(item)
+            next_item["lat"] = _to_float_safe(base_item.get("lat"))
+            next_item["lon"] = _to_float_safe(base_item.get("lon"))
+            enriched.append(next_item)
+            continue
+        enriched.append(item)
+    return enriched
 
 
 def _text_or_empty(value: Any) -> str:
@@ -684,6 +746,12 @@ def plan_manual_save(payload: PublishPlanRequest, request: Request):
 
     svc = DatabaseService()
     normalized_deliveries = [_normalize_plan_delivery(d) for d in (payload.deliveries or [])]
+    normalized_deliveries = _enrich_plan_delivery_coordinates(
+        svc=svc,
+        plan_date=plan_date,
+        deliveries=normalized_deliveries,
+        force_refresh=force_refresh,
+    )
     normalized_routes, normalized_driver_profiles = _normalize_route_driver_profiles(
         routes=payload.routes or [],
         meta=payload.meta or {},
@@ -1165,6 +1233,12 @@ def plan_manual(request: Request, date: str | None = None):
         source = "deliveries"
 
     normalized_deliveries = [_normalize_plan_delivery(d) for d in payload.get("deliveries") or []]
+    normalized_deliveries = _enrich_plan_delivery_coordinates(
+        svc=svc,
+        plan_date=plan_date,
+        deliveries=normalized_deliveries,
+        force_refresh=_wants_refresh(request),
+    )
     meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
     if meta.get("depot_lat") is None:
         meta["depot_lat"] = settings.DEPOT_LAT

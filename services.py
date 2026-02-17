@@ -1405,6 +1405,12 @@ class DatabaseService:
             delivered_at = self._first_str(fields.get(settings.DELIVERIES_DELIVERED_AT_FIELD))
             driver_lat = self._coerce_float(fields.get(settings.DELIVERIES_DRIVER_LAT_FIELD))
             driver_lon = self._coerce_float(fields.get(settings.DELIVERIES_DRIVER_LON_FIELD))
+            delivery_lat = self._coerce_float(fields.get("Latitude"))
+            delivery_lon = self._coerce_float(fields.get("Longitude"))
+            jobsite_lat = self._coerce_float(jobsite_fields.get(settings.JOBSITES_LAT_FIELD))
+            jobsite_lon = self._coerce_float(jobsite_fields.get(settings.JOBSITES_LON_FIELD))
+            lat = delivery_lat if delivery_lat not in (None, 0.0) else jobsite_lat
+            lon = delivery_lon if delivery_lon not in (None, 0.0) else jobsite_lon
             driver_notes = self._first_str(fields.get(settings.DELIVERIES_DRIVER_NOTES_FIELD))
             if not status and driver_notes.lower().startswith("[status:"):
                 closing = driver_notes.find("]")
@@ -1434,6 +1440,8 @@ class DatabaseService:
                 "route_sequence": self._coerce_int(fields.get("Route Sequence")),
                 "driver_lat": driver_lat,
                 "driver_lon": driver_lon,
+                "lat": lat,
+                "lon": lon,
                 "driver_notes": driver_notes,
                 "ps_delivered": ps_delivered,
                 "scheduled_date": self._first_str(fields.get("Scheduled Date")),
@@ -1673,6 +1681,8 @@ class DatabaseService:
                 "ps_delivered": self._to_bool(row.get("ps_delivered")),
                 "route_sequence": self._coerce_int(row.get("route_sequence")),
                 "scheduled_date": target_iso,
+                "lat": self._coerce_float(row.get("lat")),
+                "lon": self._coerce_float(row.get("lon")),
                 "med_skid": med_skid,
                 "small_skid": small_skid,
                 "large_skid": large_skid,
