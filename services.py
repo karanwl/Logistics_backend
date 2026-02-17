@@ -1276,8 +1276,13 @@ class DatabaseService:
             if self._is_jobsites_table(table_name):
                 jobsite = Jobsite(name="")
                 self._apply_jobsite_fields(jobsite, fields)
+                now_utc = datetime.now(ZoneInfo("UTC"))
                 if hasattr(jobsite, "active") and getattr(jobsite, "active", None) is None:
                     jobsite.active = True
+                if hasattr(jobsite, "created_at") and getattr(jobsite, "created_at", None) is None:
+                    jobsite.created_at = now_utc
+                if hasattr(jobsite, "updated_at") and getattr(jobsite, "updated_at", None) is None:
+                    jobsite.updated_at = now_utc
                 session.add(jobsite)
                 session.commit()
                 session.refresh(jobsite)
