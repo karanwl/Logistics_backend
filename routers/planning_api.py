@@ -620,6 +620,197 @@ def _route_metrics_summary(routes: list[dict]) -> dict[str, int]:
     }
 
 
+def _normalize_route_stop_item(item: Any) -> Dict[str, Any] | None:
+    if isinstance(item, dict):
+        out = dict(item)
+        raw_type = _text_or_empty(out.get("type")).lower()
+        if raw_type not in {"delivery", "depot"}:
+            label = _text_or_empty(out.get("label")).lower()
+            if label in {"depot", "depot - reload"}:
+                raw_type = "depot"
+            elif _text_or_empty(out.get("id") or out.get("delivery_id")):
+                raw_type = "delivery"
+
+        if raw_type == "depot":
+            label = _text_or_empty(out.get("label")) or "Depot"
+            lowered = label.strip().lower()
+            if lowered == "depot - reload":
+                label = "Depot - Reload"
+            elif lowered == "depot":
+                label = "Depot"
+            out["type"] = "depot"
+            out["label"] = label
+            return out
+
+        if raw_type == "delivery":
+            delivery_id = _text_or_empty(out.get("id") or out.get("delivery_id"))
+            out["type"] = "delivery"
+            if delivery_id:
+                out["id"] = delivery_id
+                out["delivery_id"] = delivery_id
+            return out
+        return None
+
+    token = _text_or_empty(item)
+    if not token:
+        return None
+    lowered = token.lower()
+    if lowered in {"depot", "depot - reload"}:
+        return {
+            "type": "depot",
+            "label": "Depot - Reload" if lowered == "depot - reload" else "Depot",
+        }
+    delivery_id = token.split("_Part", 1)[0].strip()
+    if not delivery_id:
+        return None
+    return {"type": "delivery", "id": delivery_id, "delivery_id": delivery_id}
+
+
+def _is_depot_stop_group(stop_group: list[Any]) -> bool:
+    for item in stop_group:
+        if isinstance(item, dict):
+            if _text_or_empty(item.get("type")).lower() == "depot":
+                return True
+            label = _text_or_empty(item.get("label")).lower()
+            if label in {"depot", "depot - reload"}:
+                return True
+        else:
+            token = _text_or_empty(item).lower()
+            if token in {"depot", "depot - reload"}:
+                return True
+    return False
+
+
+def _normalize_route_stops(raw_stops: Any) -> list[list[dict[str, Any]]]:
+    if not isinstance(raw_stops, list):
+        return []
+    normalized: list[list[dict[str, Any]]] = []
+    for stop in raw_stops:
+        group_items = stop if isinstance(stop, list) else [stop]
+        group: list[dict[str, Any]] = []
+        for item in group_items:
+            parsed = _normalize_route_stop_item(item)
+            if parsed:
+                group.append(parsed)
+        if group:
+            normalized.append(group)
+    return normalized
+
+
+def _normalize_manual_route_shape(route: dict) -> dict:
+    item = dict(route or {})
+
+    vehicle_id = item.get("vehicle_id")
+    if vehicle_id in (None, ""):
+        for key in ("v_id", "vehicleId", "id"):
+            candidate = item.get(key)
+            if candidate not in (None, ""):
+                vehicle_id = candidate
+                break
+    if vehicle_id not in (None, ""):
+        item["vehicle_id"] = vehicle_id
+
+    vehicle_type = (
+        _text_or_empty(item.get("vehicle_type"))
+        or _text_or_empty(item.get("v_type"))
+        or _text_or_empty(item.get("vehicleType"))
+        or "truck"
+    )
+    item["vehicle_type"] = vehicle_type.lower()
+
+    stops = _normalize_route_stops(item.get("stops"))
+    if not stops and isinstance(item.get("jobs"), list):
+        stops = _normalize_route_stops(item.get("jobs"))
+
+    if stops:
+        if not _is_depot_stop_group(stops[0]):
+            stops = [[{"type": "depot", "label": "Depot"}], *stops]
+        if not _is_depot_stop_group(stops[-1]):
+            stops = [*stops, [{"type": "depot", "label": "Depot"}]]
+    item["stops"] = stops
+    return item
+
+
+def _normalize_manual_routes_shape(routes: list[dict]) -> list[dict]:
+    normalized: list[dict] = []
+    for route in routes or []:
+        if isinstance(route, dict):
+            normalized.append(_normalize_manual_route_shape(route))
+    return normalized
+
+
+def _merge_routes_with_recalc(
+    base_routes: list[dict],
+    recalced_routes: list[dict] | None,
+) -> list[dict]:
+    updates_by_vehicle: Dict[str, Dict[str, Any]] = {}
+    updates_by_index: list[Dict[str, Any]] = []
+    for row in recalced_routes or []:
+        if not isinstance(row, dict):
+            continue
+        updates_by_index.append(row)
+        vehicle_key = _route_vehicle_key(row)
+        if vehicle_key:
+            updates_by_vehicle[vehicle_key] = row
+
+    merged: list[dict] = []
+    for idx, route in enumerate(base_routes or []):
+        if not isinstance(route, dict):
+            continue
+        item = dict(route)
+        route_key = _route_vehicle_key(item)
+        update = updates_by_vehicle.get(route_key) if route_key else None
+        if not update and idx < len(updates_by_index):
+            update = updates_by_index[idx]
+        if update:
+            item["total_distance_m"] = update.get("total_distance_m")
+            item["total_time_s"] = update.get("total_time_s")
+            item["stop_times"] = update.get("stop_times") or []
+            item["stop_nodes"] = update.get("stop_nodes") or []
+            if _text_or_empty(update.get("vehicle_type")):
+                item["vehicle_type"] = _text_or_empty(update.get("vehicle_type"))
+        merged.append(item)
+    return merged
+
+
+def _recalculate_manual_routes(
+    *,
+    routes: list[dict],
+    deliveries: list[dict],
+    depot_lat: Any,
+    depot_lon: Any,
+    force_refresh: bool,
+) -> tuple[list[dict], dict[str, int], list[str]]:
+    if not routes:
+        return [], _route_metrics_summary([]), []
+
+    try:
+        recalc_result = recalculate_manual_plan(
+            routes=routes,
+            deliveries=deliveries,
+            depot_lat=depot_lat,
+            depot_lon=depot_lon,
+            force_refresh=force_refresh,
+        )
+    except Exception:
+        logger.warning("Manual route recalculation failed; preserving existing route timings.", exc_info=True)
+        return routes, _route_metrics_summary(routes), []
+
+    recalced_routes = recalc_result.get("routes") if isinstance(recalc_result, dict) else []
+    merged_routes = _merge_routes_with_recalc(routes, recalced_routes if isinstance(recalced_routes, list) else [])
+    summary = (
+        recalc_result.get("summary")
+        if isinstance(recalc_result, dict) and isinstance(recalc_result.get("summary"), dict)
+        else _route_metrics_summary(merged_routes)
+    )
+    missing_coordinates = (
+        recalc_result.get("missing_delivery_coordinates")
+        if isinstance(recalc_result, dict) and isinstance(recalc_result.get("missing_delivery_coordinates"), list)
+        else []
+    )
+    return merged_routes, summary, missing_coordinates
+
+
 def _build_manual_seed_payload(svc: DatabaseService, plan_date: str, force_refresh: bool) -> Dict[str, Any]:
     base = svc.build_delivery_plan_payload(plan_date, force_refresh=force_refresh)
     deliveries = [_normalize_plan_delivery(d) for d in (base.get("deliveries") or [])]
@@ -758,46 +949,13 @@ def plan_manual_save(payload: PublishPlanRequest, request: Request):
         driver_profiles=payload.driver_profiles or [],
         svc=svc,
     )
-
-    recalc_result = recalculate_manual_plan(
+    normalized_routes = _normalize_manual_routes_shape(normalized_routes)
+    merged_routes, summary, missing_coordinates = _recalculate_manual_routes(
         routes=normalized_routes,
         deliveries=normalized_deliveries,
         depot_lat=(payload.meta or {}).get("depot_lat") if isinstance(payload.meta, dict) else None,
         depot_lon=(payload.meta or {}).get("depot_lon") if isinstance(payload.meta, dict) else None,
         force_refresh=force_refresh,
-    )
-    recalced_routes = recalc_result.get("routes") if isinstance(recalc_result, dict) else []
-    recalced_by_vehicle: Dict[str, Dict[str, Any]] = {}
-    for route_row in recalced_routes or []:
-        if not isinstance(route_row, dict):
-            continue
-        vehicle_key = _text_or_empty(route_row.get("vehicle_id"))
-        if vehicle_key:
-            recalced_by_vehicle[vehicle_key] = route_row
-
-    merged_routes: list[dict] = []
-    for route in normalized_routes:
-        if not isinstance(route, dict):
-            continue
-        item = dict(route)
-        vehicle_key = _text_or_empty(item.get("vehicle_id"))
-        update = recalced_by_vehicle.get(vehicle_key)
-        if update:
-            item["total_distance_m"] = update.get("total_distance_m")
-            item["total_time_s"] = update.get("total_time_s")
-            item["stop_times"] = update.get("stop_times") or []
-            item["stop_nodes"] = update.get("stop_nodes") or []
-        merged_routes.append(item)
-
-    summary = (
-        recalc_result.get("summary")
-        if isinstance(recalc_result, dict) and isinstance(recalc_result.get("summary"), dict)
-        else _route_metrics_summary(merged_routes)
-    )
-    missing_coordinates = (
-        recalc_result.get("missing_delivery_coordinates")
-        if isinstance(recalc_result, dict) and isinstance(recalc_result.get("missing_delivery_coordinates"), list)
-        else []
     )
 
     meta_payload: Dict[str, Any] = dict(payload.meta or {})
@@ -1224,12 +1382,13 @@ def plan_debug_matrix(
 def plan_manual(request: Request, date: str | None = None):
     _require_manager_admin(request)
     plan_date = _require_iso_date_param(date, "date") if date else _business_date(offset_days=0)
+    force_refresh = _wants_refresh(request)
     svc = DatabaseService()
     payload = svc.get_plan_payload(plan_date, "manual")
     source = "manual_plans"
     manual_saved = payload is not None
     if not payload:
-        payload = _build_manual_seed_payload(svc, plan_date, force_refresh=_wants_refresh(request))
+        payload = _build_manual_seed_payload(svc, plan_date, force_refresh=force_refresh)
         source = "deliveries"
 
     normalized_deliveries = [_normalize_plan_delivery(d) for d in payload.get("deliveries") or []]
@@ -1237,15 +1396,27 @@ def plan_manual(request: Request, date: str | None = None):
         svc=svc,
         plan_date=plan_date,
         deliveries=normalized_deliveries,
-        force_refresh=_wants_refresh(request),
+        force_refresh=force_refresh,
     )
     meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
     if meta.get("depot_lat") is None:
         meta["depot_lat"] = settings.DEPOT_LAT
     if meta.get("depot_lon") is None:
         meta["depot_lon"] = settings.DEPOT_LON
-    if not isinstance(meta.get("manual_metrics"), dict):
-        meta["manual_metrics"] = _route_metrics_summary(payload.get("routes") or [])
+
+    normalized_routes = _normalize_manual_routes_shape(payload.get("routes") or [])
+    normalized_routes, summary, missing_coordinates = _recalculate_manual_routes(
+        routes=normalized_routes,
+        deliveries=normalized_deliveries,
+        depot_lat=meta.get("depot_lat"),
+        depot_lon=meta.get("depot_lon"),
+        force_refresh=force_refresh,
+    )
+    meta["manual_metrics"] = summary
+    if missing_coordinates:
+        meta["missing_delivery_coordinates"] = missing_coordinates
+    else:
+        meta.pop("missing_delivery_coordinates", None)
     payload["meta"] = meta
 
     resp = ok_response(
@@ -1256,7 +1427,7 @@ def plan_manual(request: Request, date: str | None = None):
             "published": bool(manual_saved),
             "manual_saved": bool(manual_saved),
             "record_id": f"{plan_date}::manual",
-            "routes": payload.get("routes") or [],
+            "routes": normalized_routes,
             "deliveries": normalized_deliveries,
             "meta": meta,
             "fleet": payload.get("fleet") or {},
