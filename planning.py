@@ -44,32 +44,23 @@ def parse_hhmm_to_seconds_from_6am(val):
 # Capacity normalization helpers
 # ----------------------------
 def _med_skid_units() -> int:
-    return int(getattr(settings, "MED_SKID_UNITS", getattr(settings, "LONG_SKID_UNITS", 20)))
+    return int(settings.MED_SKID_UNITS)
 
 
 def _large_skid_units() -> int:
-    return int(getattr(settings, "LARGE_SKID_UNITS", 25))
+    return int(settings.LARGE_SKID_UNITS)
 
 
 def _small_skid_units() -> int:
-    return int(getattr(settings, "SMALL_SKID_UNITS", 10))
+    return int(settings.SMALL_SKID_UNITS)
 
 
 def _frame_units() -> int:
-    return int(getattr(settings, "FRAME_UNITS", 1))
+    return int(settings.FRAME_UNITS)
 
 
 def _vehicle_capacity_units() -> int:
-    # Preferred new setting:
-    # VEHICLE_CAPACITY_UNITS = 140 (== 7 med skids OR 14 small skids OR 140 frames)
-    cap = getattr(settings, "VEHICLE_CAPACITY_UNITS", None)
-    if cap is not None:
-        return int(cap)
-
-    # Backward compatible fallback: MAX_SKIDS means "med skids" capacity.
-    # So convert to units.
-    max_long = int(getattr(settings, "MAX_SKIDS", 7))
-    return max_long * _med_skid_units()
+    return int(settings.VEHICLE_CAPACITY_UNITS)
 
 
 def _to_bool(value: Any) -> bool:
@@ -221,13 +212,13 @@ def _node_requires_truck_for_tokens(tokens: List[str], delivery_by_id: Dict[str,
     if skid_present and (door_total > 0 or frame_total > 0 or exp_frame_total > 0):
         return True
     if (
-        door_total > int(getattr(RouteOptimizer, "VAN_DOOR_LIMIT", 3))
-        or frame_total > int(getattr(RouteOptimizer, "VAN_FRAME_LIMIT", 3))
-        or exp_frame_total > int(getattr(RouteOptimizer, "VAN_EXP_FRAME_LIMIT", 10))
+        door_total > int(settings.SOLVER_VAN_DOOR_LIMIT)
+        or frame_total > int(settings.SOLVER_VAN_FRAME_LIMIT)
+        or exp_frame_total > int(settings.SOLVER_VAN_EXP_FRAME_LIMIT)
     ):
         return True
 
-    van_capacity_units = int(getattr(settings, "VAN_CAPACITY_UNITS", RouteOptimizer.VAN_CAPACITY_UNITS) or 0)
+    van_capacity_units = int(settings.VAN_CAPACITY_UNITS or 0)
     if van_capacity_units <= 0:
         return total_units > 0
     return total_units > van_capacity_units
@@ -690,34 +681,6 @@ def generate_tomorrow_plan(
         if starts and ends:
             node_time_windows[node_idx] = (max(starts), min(ends))
 
-    # IMPORTANT:
-    # physical_truck_count should match the number of trucks you actually made available,
-    # otherwise the solver might mark some trucks as "overflow" and assign huge fixed costs.
-    #
-    # NOTE ON SMALL SKIDS:
-    # This file now groups/splits stops using normalized capacity units.
-    # Default profile: 140 units = 7 med skids = 14 small skids = 140 frames.
-    # Ensure RouteOptimizer capacity logic is updated to also use the same unit model, e.g.:
-    #   demand_units = d.med_skid*MED_SKID_UNITS + d.large_skid*LARGE_SKID_UNITS
-    #                + d.small_skid*SMALL_SKID_UNITS + (d.frame+d.exp_frame)*FRAME_UNITS
-    #   vehicle_capacity = VEHICLE_CAPACITY_UNITS
-    penalty_profile = {
-        "truck_cost_factor": settings.SOLVER_TRUCK_COST_FACTOR,
-        "truck_time_factor": settings.SOLVER_TRUCK_TIME_FACTOR,
-        "truck_serve_van_eligible_penalty": settings.SOLVER_TRUCK_SERVE_VAN_ELIGIBLE_PENALTY,
-        "time_span_cost_coeff": settings.SOLVER_TIME_SPAN_COST_COEFFICIENT,
-        "downtown_soft_latest_s": settings.SOLVER_DOWNTOWN_SOFT_LATEST_SECONDS,
-        "downtown_hard_latest_s": settings.SOLVER_DOWNTOWN_HARD_LATEST_SECONDS,
-        "downtown_late_penalty_per_sec": settings.SOLVER_DOWNTOWN_LATE_PENALTY_PER_SECOND,
-        "van_fixed_cost": settings.SOLVER_VAN_FIXED_COST,
-        "truck_fixed_cost_physical": settings.SOLVER_TRUCK_FIXED_COST_PHYSICAL,
-        "truck_fixed_cost_overflow": settings.SOLVER_TRUCK_FIXED_COST_OVERFLOW,
-        "drop_node_penalty": settings.SOLVER_DROP_NODE_PENALTY,
-        "shift_seconds": settings.SOLVER_SHIFT_SECONDS,
-        "waiting_slack_seconds": settings.SOLVER_WAITING_SLACK_SECONDS,
-        "search_time_limit_s": settings.SOLVER_TIME_LIMIT_SECONDS,
-    }
-
     opt = RouteOptimizer(
         matrix["durations"],
         matrix["distances"],
@@ -727,7 +690,6 @@ def generate_tomorrow_plan(
         physical_truck_count=trucks,
         node_is_downtown=node_is_downtown,
         node_time_windows=node_time_windows,
-        penalty_profile=penalty_profile,
     )
 
     raw_results = opt.solve() or []
@@ -748,7 +710,7 @@ def generate_tomorrow_plan(
             "small_skid_units": _small_skid_units(),
             "frame_units": _frame_units(),
         },
-        "solver_penalties": penalty_profile,
+        "solver_penalties": dict(opt.costs),
     }
     return {
         "deliveries": deliveries_payload,
@@ -780,9 +742,9 @@ def recalculate_tomorrow_plan(routes: List[Dict[str, Any]], force_refresh: bool 
     distances = matrix.get("distances", [])
     durations = matrix.get("durations", [])
 
-    TRUCK_TIME_FACTOR = 1.10
-    TRUCK_SERVICE_TIME = 30 * 60
-    VAN_SERVICE_TIME = 10 * 60
+    TRUCK_TIME_FACTOR = float(settings.SOLVER_TRUCK_TIME_FACTOR)
+    TRUCK_SERVICE_TIME = int(settings.SOLVER_TRUCK_SERVICE_TIME_SECONDS)
+    VAN_SERVICE_TIME = int(settings.SOLVER_VAN_SERVICE_TIME_SECONDS)
 
     recalced = []
     for route in routes or []:
@@ -898,9 +860,9 @@ def recalculate_manual_plan(
     depot_lat_f = _to_float(depot_lat)
     depot_lon_f = _to_float(depot_lon)
     if depot_lat_f is None:
-        depot_lat_f = float(getattr(settings, "DEPOT_LAT", 0.0) or 0.0)
+        depot_lat_f = float(settings.DEPOT_LAT)
     if depot_lon_f is None:
-        depot_lon_f = float(getattr(settings, "DEPOT_LON", 0.0) or 0.0)
+        depot_lon_f = float(settings.DEPOT_LON)
 
     coords_list: List[Tuple[float, float]] = [(depot_lon_f, depot_lat_f)]
     coord_node_index: Dict[Tuple[float, float], int] = {}
@@ -950,7 +912,7 @@ def recalculate_manual_plan(
     durations: List[List[float]] = []
 
     if len(coords_list) >= 2:
-        matrix_max_coords = int(getattr(settings, "MANUAL_RECALC_MATRIX_MAX_COORDS", 25) or 25)
+        matrix_max_coords = int(settings.MANUAL_RECALC_MATRIX_MAX_COORDS)
         if len(coords_list) > matrix_max_coords:
             raise ValueError(
                 "Manual recalculation exceeds Mapbox Matrix limit: "
@@ -961,10 +923,10 @@ def recalculate_manual_plan(
         distances = matrix.get("distances", []) or []
         durations = matrix.get("durations", []) or []
 
-    truck_time_factor = 1.10
-    truck_service_time_s = 30 * 60
-    van_service_time_s = 10 * 60
-    reload_service_time_s = int(getattr(settings, "RELOAD_SERVICE_TIME_S", 0) or 0)
+    truck_time_factor = float(settings.SOLVER_TRUCK_TIME_FACTOR)
+    truck_service_time_s = int(settings.SOLVER_TRUCK_SERVICE_TIME_SECONDS)
+    van_service_time_s = int(settings.SOLVER_VAN_SERVICE_TIME_SECONDS)
+    reload_service_time_s = int(settings.RELOAD_SERVICE_TIME_S)
 
     def _delivery_id_from_stop_item(stop_item: Any) -> str:
         if isinstance(stop_item, dict):

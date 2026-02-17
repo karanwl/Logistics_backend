@@ -22,38 +22,6 @@ class RouteOptimizer:
     Van truck-only constraints stay controlled by truck_req_cb rules.
     """
 
-    # Defaults
-    MED_SKID_UNITS = 20
-    LARGE_SKID_UNITS = 25
-    SMALL_SKID_UNITS = 10
-    FRAME_UNITS = 1
-    TRUCK_CAPACITY_UNITS = 140
-    VAN_CAPACITY_UNITS = 25
-    VAN_FRAME_LIMIT = 3
-    VAN_DOOR_LIMIT = 3
-    VAN_EXP_FRAME_LIMIT = 10
-    RELOAD_THRESHOLD_UNITS = 140
-
-    DEFAULT_PENALTIES = {
-        "truck_cost_factor": 1.12,
-        "truck_time_factor": 1.08,
-        "truck_serve_van_eligible_penalty": 2500,
-        "time_span_cost_coeff": 5,
-        "downtown_soft_latest_s": 4 * 3600,   # 10:00 (from 6:00 start)
-        "downtown_hard_latest_s": 6 * 3600,   # 12:00 hard cap
-        "downtown_late_penalty_per_sec": 60,
-        "van_fixed_cost": 1500,
-        "truck_fixed_cost_physical": 15000,
-        "truck_fixed_cost_overflow": 100000,
-        "drop_node_penalty": 100000,
-        "truck_service_time_s": 30 * 60,
-        "van_service_time_s": 10 * 60,
-        "shift_seconds": 8 * 3600,
-        "waiting_slack_seconds": 600,
-        "search_time_limit_s": 60,
-        "search_print_results": True,
-    }
-
     def __init__(
         self,
         duration_matrix,
@@ -64,7 +32,6 @@ class RouteOptimizer:
         physical_truck_count=2,
         node_is_downtown=None,
         node_time_windows=None,
-        penalty_profile=None,
     ):
         self.duration_matrix = self._prepare(duration_matrix)
         self.distance_matrix = self._prepare(distance_matrix)
@@ -86,54 +53,52 @@ class RouteOptimizer:
         self.reload_nodes = []
         self.base_node_count = len(self.distance_matrix)
 
-        # Allow overriding penalties via penalty_profile
-        self.penalties = dict(self.DEFAULT_PENALTIES)
-        if isinstance(penalty_profile, dict):
-            for key, val in penalty_profile.items():
-                if key in self.penalties and val is not None:
-                    self.penalties[key] = val
         self.costs = self._build_costs()
 
         self.med_skid_units = max(
             1,
-            int(getattr(settings, "MED_SKID_UNITS", getattr(settings, "LONG_SKID_UNITS", self.MED_SKID_UNITS))),
+            int(settings.MED_SKID_UNITS),
         )
-        self.large_skid_units = max(1, int(getattr(settings, "LARGE_SKID_UNITS", self.LARGE_SKID_UNITS)))
-        self.small_skid_units = max(1, int(getattr(settings, "SMALL_SKID_UNITS", self.SMALL_SKID_UNITS)))
-        self.frame_units = max(1, int(getattr(settings, "FRAME_UNITS", self.FRAME_UNITS)))
+        self.large_skid_units = max(1, int(settings.LARGE_SKID_UNITS))
+        self.small_skid_units = max(1, int(settings.SMALL_SKID_UNITS))
+        self.frame_units = max(1, int(settings.FRAME_UNITS))
         self.truck_capacity_units = max(
             1,
-            int(getattr(settings, "VEHICLE_CAPACITY_UNITS", self.TRUCK_CAPACITY_UNITS)),
+            int(settings.VEHICLE_CAPACITY_UNITS),
         )
-        reload_threshold = int(getattr(settings, "SOLVER_RELOAD_THRESHOLD_UNITS", self.RELOAD_THRESHOLD_UNITS))
+        reload_threshold = int(settings.SOLVER_RELOAD_THRESHOLD_UNITS)
         if reload_threshold <= 0:
             reload_threshold = int(self.truck_capacity_units)
         self.reload_threshold_units = max(1, int(reload_threshold))
         self.van_capacity_units = max(
             0,
-            int(getattr(settings, "VAN_CAPACITY_UNITS", self.VAN_CAPACITY_UNITS)),
+            int(settings.VAN_CAPACITY_UNITS),
         )
+        self.van_frame_limit = max(0, int(settings.SOLVER_VAN_FRAME_LIMIT))
+        self.van_door_limit = max(0, int(settings.SOLVER_VAN_DOOR_LIMIT))
+        self.van_exp_frame_limit = max(0, int(settings.SOLVER_VAN_EXP_FRAME_LIMIT))
 
         self._auto_add_reload_nodes()
 
     def _build_costs(self) -> dict:
         return {
-            "truck_cost_factor": float(self.penalties["truck_cost_factor"]),
-            "truck_time_factor": float(self.penalties["truck_time_factor"]),
-            "truck_serve_van_eligible_penalty": int(self.penalties["truck_serve_van_eligible_penalty"]),
-            "time_span_cost_coeff": int(self.penalties["time_span_cost_coeff"]),
-            "downtown_soft_latest_s": int(self.penalties["downtown_soft_latest_s"]),
-            "downtown_hard_latest_s": int(self.penalties["downtown_hard_latest_s"]),
-            "downtown_late_penalty_per_sec": int(self.penalties["downtown_late_penalty_per_sec"]),
-            "van_fixed_cost": int(self.penalties["van_fixed_cost"]),
-            "truck_fixed_cost_physical": int(self.penalties["truck_fixed_cost_physical"]),
-            "truck_fixed_cost_overflow": int(self.penalties["truck_fixed_cost_overflow"]),
-            "drop_node_penalty": int(self.penalties["drop_node_penalty"]),
-            "truck_service_time_s": int(self.penalties.get("truck_service_time_s", 30 * 60)),
-            "van_service_time_s": int(self.penalties.get("van_service_time_s", 10 * 60)),
-            "shift_seconds": int(self.penalties["shift_seconds"]),
-            "waiting_slack_seconds": int(self.penalties["waiting_slack_seconds"]),
-            "search_time_limit_s": int(self.penalties["search_time_limit_s"]),
+            "truck_cost_factor": float(settings.SOLVER_TRUCK_COST_FACTOR),
+            "truck_time_factor": float(settings.SOLVER_TRUCK_TIME_FACTOR),
+            "truck_serve_van_eligible_penalty": int(settings.SOLVER_TRUCK_SERVE_VAN_ELIGIBLE_PENALTY),
+            "time_span_cost_coeff": int(settings.SOLVER_TIME_SPAN_COST_COEFFICIENT),
+            "downtown_soft_latest_s": int(settings.SOLVER_DOWNTOWN_SOFT_LATEST_SECONDS),
+            "downtown_hard_latest_s": int(settings.SOLVER_DOWNTOWN_HARD_LATEST_SECONDS),
+            "downtown_late_penalty_per_sec": int(settings.SOLVER_DOWNTOWN_LATE_PENALTY_PER_SECOND),
+            "van_fixed_cost": int(settings.SOLVER_VAN_FIXED_COST),
+            "truck_fixed_cost_physical": int(settings.SOLVER_TRUCK_FIXED_COST_PHYSICAL),
+            "truck_fixed_cost_overflow": int(settings.SOLVER_TRUCK_FIXED_COST_OVERFLOW),
+            "drop_node_penalty": int(settings.SOLVER_DROP_NODE_PENALTY),
+            "truck_service_time_s": int(settings.SOLVER_TRUCK_SERVICE_TIME_SECONDS),
+            "van_service_time_s": int(settings.SOLVER_VAN_SERVICE_TIME_SECONDS),
+            "shift_seconds": int(settings.SOLVER_SHIFT_SECONDS),
+            "waiting_slack_seconds": int(settings.SOLVER_WAITING_SLACK_SECONDS),
+            "search_time_limit_s": int(settings.SOLVER_TIME_LIMIT_SECONDS),
+            "search_print_results": bool(settings.SOLVER_PRINT_RESULTS),
         }
 
     # ---------------------------
@@ -159,9 +124,9 @@ class RouteOptimizer:
         if skid_present and (door_total > 0 or frame_total > 0 or exp_frame_total > 0):
             return True
         if (
-            door_total > self.VAN_DOOR_LIMIT
-            or frame_total > self.VAN_FRAME_LIMIT
-            or exp_frame_total > self.VAN_EXP_FRAME_LIMIT
+            door_total > self.van_door_limit
+            or frame_total > self.van_frame_limit
+            or exp_frame_total > self.van_exp_frame_limit
         ):
             return True
         units = self._node_capacity_units(node)
@@ -519,7 +484,7 @@ class RouteOptimizer:
     # Logging + single-model solve
     # ---------------------------
     def _print_search(self, message: str):
-        if bool(self.penalties.get("search_print_results", True)):
+        if bool(self.costs.get("search_print_results", True)):
             logger.info("%s", message)
 
     def _summarize_output(self, output: list[dict]) -> dict:

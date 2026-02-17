@@ -812,11 +812,11 @@ def _dashboard_highlights(improvements: dict[str, Any], compared_days: int) -> l
 
 def _capacity_profile_payload() -> Dict[str, int]:
     return {
-        "vehicle_capacity_units": int(getattr(settings, "VEHICLE_CAPACITY_UNITS", 140) or 140),
-        "med_skid_units": int(getattr(settings, "MED_SKID_UNITS", getattr(settings, "LONG_SKID_UNITS", 20)) or 20),
-        "large_skid_units": int(getattr(settings, "LARGE_SKID_UNITS", 25) or 25),
-        "small_skid_units": int(getattr(settings, "SMALL_SKID_UNITS", 10) or 10),
-        "frame_units": int(getattr(settings, "FRAME_UNITS", 1) or 1),
+        "vehicle_capacity_units": int(settings.VEHICLE_CAPACITY_UNITS),
+        "med_skid_units": int(settings.MED_SKID_UNITS),
+        "large_skid_units": int(settings.LARGE_SKID_UNITS),
+        "small_skid_units": int(settings.SMALL_SKID_UNITS),
+        "frame_units": int(settings.FRAME_UNITS),
     }
 
 
@@ -986,9 +986,9 @@ def _build_manual_meta_payload(
     depot_lat = _to_float_safe(payload.get("depot_lat"))
     depot_lon = _to_float_safe(payload.get("depot_lon"))
     if depot_lat is None:
-        depot_lat = float(getattr(settings, "DEPOT_LAT", 0.0) or 0.0)
+        depot_lat = float(settings.DEPOT_LAT)
     if depot_lon is None:
-        depot_lon = float(getattr(settings, "DEPOT_LON", 0.0) or 0.0)
+        depot_lon = float(settings.DEPOT_LON)
 
     summary_obj = summary if isinstance(summary, dict) else {}
     fleet_payload = _coerce_fleet_payload(fleet if isinstance(fleet, dict) else None, routes)
@@ -1932,7 +1932,7 @@ def plan_dashboard(
         raise HTTPException(status_code=400, detail="start_date must be on or before end_date.")
 
     range_days = (end_dt - start_dt).days + 1
-    max_range_days = int(getattr(settings, "DASHBOARD_MAX_RANGE_DAYS", 366) or 366)
+    max_range_days = int(settings.DASHBOARD_MAX_RANGE_DAYS)
     if range_days > max_range_days:
         raise HTTPException(
             status_code=400,

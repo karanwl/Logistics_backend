@@ -1805,10 +1805,10 @@ class DatabaseService:
                 "window_start": self._first_str(row.get("window_start")),
                 "window_end": self._first_str(row.get("window_end")),
                 "capacity_units": (
-                    med_skid * int(getattr(settings, "MED_SKID_UNITS", getattr(settings, "LONG_SKID_UNITS", 20)))
-                    + large_skid * int(getattr(settings, "LARGE_SKID_UNITS", 25))
-                    + small_skid * int(getattr(settings, "SMALL_SKID_UNITS", 10))
-                    + (frame + exp_frame) * int(getattr(settings, "FRAME_UNITS", 1))
+                    med_skid * int(settings.MED_SKID_UNITS)
+                    + large_skid * int(settings.LARGE_SKID_UNITS)
+                    + small_skid * int(settings.SMALL_SKID_UNITS)
+                    + (frame + exp_frame) * int(settings.FRAME_UNITS)
                 ),
             }
             delivery["requires_truck"] = bool(
@@ -3065,7 +3065,12 @@ class DatabaseService:
 
 class MapboxService:
     _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-    _CACHE_DIR = os.getenv("MATRIX_CACHE_DIR", os.path.join(_BASE_DIR, ".cache"))
+    _CACHE_DIR_SETTING = str(settings.MATRIX_CACHE_DIR or "").strip()
+    _CACHE_DIR = (
+        _CACHE_DIR_SETTING
+        if os.path.isabs(_CACHE_DIR_SETTING)
+        else os.path.join(_BASE_DIR, _CACHE_DIR_SETTING or ".cache")
+    )
     _MATRIX_VALIDATION_VERSION = 2
     _LAST_CACHE_CLEANUP = 0.0
 
