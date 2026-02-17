@@ -872,7 +872,8 @@ class DatabaseService:
             elif key == "Pickup":
                 delivery.pickup = self._to_bool(value)
             elif key == settings.DELIVERIES_PICKUP_VEHICLE_FIELD or key == "Pickup Vehicle":
-                delivery.pickup_vehicle = self._normalize_pickup_vehicle(value)
+                normalized_pickup_vehicle = self._normalize_pickup_vehicle(value)
+                delivery.pickup_vehicle = normalized_pickup_vehicle or None
             elif key == "Requires Empty Truck":
                 delivery.requires_empty_truck = self._to_bool(value)
             elif key == "Door":
@@ -1291,6 +1292,27 @@ class DatabaseService:
             if self._is_deliveries_table(table_name):
                 delivery = Delivery()
                 self._apply_delivery_fields(delivery, fields)
+                now_utc = datetime.now(ZoneInfo("UTC"))
+                if hasattr(delivery, "ps_delivered") and getattr(delivery, "ps_delivered", None) is None:
+                    delivery.ps_delivered = False
+                if hasattr(delivery, "pickup") and getattr(delivery, "pickup", None) is None:
+                    delivery.pickup = False
+                if hasattr(delivery, "requires_empty_truck") and getattr(delivery, "requires_empty_truck", None) is None:
+                    delivery.requires_empty_truck = False
+                for attr in ("med_skid", "small_skid", "large_skid", "door", "frame", "exp_frame", "box"):
+                    if hasattr(delivery, attr) and getattr(delivery, attr, None) is None:
+                        setattr(delivery, attr, 0)
+                if hasattr(delivery, "pickup_vehicle"):
+                    pickup_vehicle = self._normalize_pickup_vehicle(getattr(delivery, "pickup_vehicle", None))
+                    if bool(getattr(delivery, "pickup", False)) and not pickup_vehicle:
+                        pickup_vehicle = "both"
+                    delivery.pickup_vehicle = pickup_vehicle or None
+                if hasattr(delivery, "custom_stop") and getattr(delivery, "custom_stop", None) is None:
+                    delivery.custom_stop = False
+                if hasattr(delivery, "created_at") and getattr(delivery, "created_at", None) is None:
+                    delivery.created_at = now_utc
+                if hasattr(delivery, "updated_at") and getattr(delivery, "updated_at", None) is None:
+                    delivery.updated_at = now_utc
                 session.add(delivery)
                 session.commit()
                 session.refresh(delivery)
