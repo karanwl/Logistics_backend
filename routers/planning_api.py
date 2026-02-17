@@ -620,6 +620,203 @@ def _route_metrics_summary(routes: list[dict]) -> dict[str, int]:
     }
 
 
+def _capacity_profile_payload() -> Dict[str, int]:
+    return {
+        "vehicle_capacity_units": int(getattr(settings, "VEHICLE_CAPACITY_UNITS", 140) or 140),
+        "med_skid_units": int(getattr(settings, "MED_SKID_UNITS", getattr(settings, "LONG_SKID_UNITS", 20)) or 20),
+        "large_skid_units": int(getattr(settings, "LARGE_SKID_UNITS", 25) or 25),
+        "small_skid_units": int(getattr(settings, "SMALL_SKID_UNITS", 10) or 10),
+        "frame_units": int(getattr(settings, "FRAME_UNITS", 1) or 1),
+    }
+
+
+def _solver_penalties_payload() -> Dict[str, Any]:
+    return {
+        "truck_cost_factor": settings.SOLVER_TRUCK_COST_FACTOR,
+        "truck_time_factor": settings.SOLVER_TRUCK_TIME_FACTOR,
+        "truck_serve_van_eligible_penalty": settings.SOLVER_TRUCK_SERVE_VAN_ELIGIBLE_PENALTY,
+        "time_span_cost_coeff": settings.SOLVER_TIME_SPAN_COST_COEFFICIENT,
+        "downtown_soft_latest_s": settings.SOLVER_DOWNTOWN_SOFT_LATEST_SECONDS,
+        "downtown_hard_latest_s": settings.SOLVER_DOWNTOWN_HARD_LATEST_SECONDS,
+        "downtown_late_penalty_per_sec": settings.SOLVER_DOWNTOWN_LATE_PENALTY_PER_SECOND,
+        "van_fixed_cost": settings.SOLVER_VAN_FIXED_COST,
+        "truck_fixed_cost_physical": settings.SOLVER_TRUCK_FIXED_COST_PHYSICAL,
+        "truck_fixed_cost_overflow": settings.SOLVER_TRUCK_FIXED_COST_OVERFLOW,
+        "drop_node_penalty": settings.SOLVER_DROP_NODE_PENALTY,
+        "shift_seconds": settings.SOLVER_SHIFT_SECONDS,
+        "waiting_slack_seconds": settings.SOLVER_WAITING_SLACK_SECONDS,
+        "search_time_limit_s": settings.SOLVER_TIME_LIMIT_SECONDS,
+    }
+
+
+def _canonical_plan_delivery(item: Any) -> Dict[str, Any]:
+    normalized = _normalize_plan_delivery(item)
+    delivery_id = _text_or_empty(
+        normalized.get("id") or normalized.get("delivery_id") or normalized.get("record_id")
+    )
+    if not delivery_id:
+        return {}
+
+    med_skid = _to_int_safe(normalized.get("med_skid"), 0)
+    large_skid = _to_int_safe(normalized.get("large_skid"), 0)
+    small_skid = _to_int_safe(normalized.get("small_skid"), 0)
+    door = _to_int_safe(normalized.get("door"), 0)
+    frame = _to_int_safe(normalized.get("frame"), 0)
+    exp_frame = _to_int_safe(normalized.get("exp_frame"), 0)
+    box = _to_int_safe(normalized.get("box"), 0)
+
+    pickup = bool(normalized.get("pickup"))
+    pickup_vehicle = DatabaseService._normalize_pickup_vehicle(normalized.get("pickup_vehicle"))
+    if pickup and not pickup_vehicle:
+        pickup_vehicle = "both"
+    if not pickup:
+        pickup_vehicle = ""
+    requires_empty_truck = bool(normalized.get("requires_empty_truck"))
+
+    capacity = _capacity_profile_payload()
+    computed_units = (
+        med_skid * int(capacity["med_skid_units"])
+        + large_skid * int(capacity["large_skid_units"])
+        + small_skid * int(capacity["small_skid_units"])
+        + (frame + exp_frame) * int(capacity["frame_units"])
+    )
+    capacity_units = _to_int_safe(normalized.get("capacity_units"), computed_units)
+
+    requires_truck = bool(normalized.get("requires_truck")) or bool(
+        door > 0
+        or frame > 0
+        or exp_frame > 0
+        or med_skid > 0
+        or small_skid > 0
+        or large_skid > 0
+        or (pickup and (pickup_vehicle == "truck" or requires_empty_truck))
+    )
+
+    driver = _text_or_empty(normalized.get("driver"))
+    if driver.isdigit():
+        driver = ""
+
+    return {
+        "id": delivery_id,
+        "job_name": _text_or_empty(normalized.get("job_name")),
+        "job_address": _text_or_empty(normalized.get("job_address")),
+        "sales_order": _text_or_empty(normalized.get("sales_order")),
+        "packing_slip": _text_or_empty(normalized.get("packing_slip")),
+        "driver": driver,
+        "lat": float(_to_float_safe(normalized.get("lat")) or 0.0),
+        "lon": float(_to_float_safe(normalized.get("lon")) or 0.0),
+        "door": door,
+        "frame": frame,
+        "exp_frame": exp_frame,
+        "med_skid": med_skid,
+        "small_skid": small_skid,
+        "large_skid": large_skid,
+        "box": box,
+        "requires_truck": requires_truck,
+        "pickup": pickup,
+        "pickup_vehicle": pickup_vehicle,
+        "requires_empty_truck": requires_empty_truck,
+        "window_start": _text_or_empty(normalized.get("window_start")) or None,
+        "window_end": _text_or_empty(normalized.get("window_end")) or None,
+        "capacity_units": capacity_units,
+    }
+
+
+def _canonical_plan_deliveries(items: list[dict]) -> list[dict]:
+    out: list[dict] = []
+    for item in items or []:
+        canonical = _canonical_plan_delivery(item)
+        if canonical:
+            out.append(canonical)
+    return out
+
+
+def _matrix_node_count_for_deliveries(deliveries: list[dict]) -> int:
+    coords: set[tuple[float, float]] = set()
+    for item in deliveries or []:
+        if not isinstance(item, dict):
+            continue
+        lat = _to_float_safe(item.get("lat"))
+        lon = _to_float_safe(item.get("lon"))
+        if lat is None or lon is None:
+            continue
+        if abs(lat) < 1e-9 and abs(lon) < 1e-9:
+            continue
+        coords.add((round(float(lon), 6), round(float(lat), 6)))
+    return 1 + len(coords)
+
+
+def _coerce_fleet_payload(fleet: dict | None, routes: list[dict]) -> Dict[str, int]:
+    trucks = _to_int_safe((fleet or {}).get("trucks") if isinstance(fleet, dict) else None, -1)
+    vans = _to_int_safe((fleet or {}).get("vans") if isinstance(fleet, dict) else None, -1)
+    if trucks >= 0 and vans >= 0:
+        return {"trucks": int(max(0, trucks)), "vans": int(max(0, vans))}
+
+    trucks = 0
+    vans = 0
+    for route in routes or []:
+        if not isinstance(route, dict):
+            continue
+        v_type = _text_or_empty(
+            route.get("vehicle_type") or route.get("v_type") or route.get("vehicleType")
+        ).lower()
+        if v_type == "van":
+            vans += 1
+        elif v_type == "truck":
+            trucks += 1
+    return {"trucks": int(trucks), "vans": int(vans)}
+
+
+def _build_manual_meta_payload(
+    meta_base: dict | None,
+    *,
+    plan_date: str,
+    deliveries: list[dict],
+    routes: list[dict],
+    fleet: dict | None,
+    summary: dict | None,
+) -> Dict[str, Any]:
+    payload: Dict[str, Any] = dict(meta_base or {})
+
+    depot_lat = _to_float_safe(payload.get("depot_lat"))
+    depot_lon = _to_float_safe(payload.get("depot_lon"))
+    if depot_lat is None:
+        depot_lat = float(getattr(settings, "DEPOT_LAT", 0.0) or 0.0)
+    if depot_lon is None:
+        depot_lon = float(getattr(settings, "DEPOT_LON", 0.0) or 0.0)
+
+    summary_obj = summary if isinstance(summary, dict) else {}
+    fleet_payload = _coerce_fleet_payload(fleet if isinstance(fleet, dict) else None, routes)
+    matrix_node_count = _to_int_safe(
+        summary_obj.get("matrix_node_count"),
+        _matrix_node_count_for_deliveries(deliveries),
+    )
+    delivery_nodes = _to_int_safe(summary_obj.get("delivery_nodes"), max(0, matrix_node_count - 1))
+    driver_assignments = payload.get("driver_assignments")
+    if not isinstance(driver_assignments, dict):
+        driver_assignments = {}
+
+    vehicle_count = int(fleet_payload.get("trucks", 0) + fleet_payload.get("vans", 0))
+    if vehicle_count <= 0:
+        vehicle_count = len([r for r in routes or [] if isinstance(r, dict)])
+
+    payload.update(
+        {
+            "plan_date": plan_date,
+            "depot_lat": float(depot_lat),
+            "depot_lon": float(depot_lon),
+            "delivery_count": len(deliveries or []),
+            "node_count": int(matrix_node_count),
+            "vehicle_count": int(vehicle_count),
+            "fleet": fleet_payload,
+            "capacity": _capacity_profile_payload(),
+            "solver_penalties": _solver_penalties_payload(),
+            "driver_assignments": driver_assignments,
+        }
+    )
+    return payload
+
+
 def _normalize_route_stop_item(item: Any) -> Dict[str, Any] | None:
     if isinstance(item, dict):
         out = dict(item)
@@ -813,24 +1010,29 @@ def _recalculate_manual_routes(
 
 def _build_manual_seed_payload(svc: DatabaseService, plan_date: str, force_refresh: bool) -> Dict[str, Any]:
     base = svc.build_delivery_plan_payload(plan_date, force_refresh=force_refresh)
-    deliveries = [_normalize_plan_delivery(d) for d in (base.get("deliveries") or [])]
+    deliveries = _canonical_plan_deliveries([_normalize_plan_delivery(d) for d in (base.get("deliveries") or [])])
+    summary = {
+        "route_count": 0,
+        "total_distance_m": 0,
+        "total_time_s": 0,
+        "total_stops": 0,
+        "delivery_nodes": max(0, _matrix_node_count_for_deliveries(deliveries) - 1),
+        "matrix_node_count": _matrix_node_count_for_deliveries(deliveries),
+    }
+    meta_payload = _build_manual_meta_payload(
+        {},
+        plan_date=plan_date,
+        deliveries=deliveries,
+        routes=[],
+        fleet={"trucks": 0, "vans": 0},
+        summary=summary,
+    )
     return {
         "plan_date": plan_date,
         "plan_type": "manual",
         "routes": [],
         "deliveries": deliveries,
-        "meta": {
-            "source": "deliveries",
-            "plan_date": plan_date,
-            "depot_lat": settings.DEPOT_LAT,
-            "depot_lon": settings.DEPOT_LON,
-            "manual_metrics": {
-                "route_count": 0,
-                "total_distance_m": 0,
-                "total_time_s": 0,
-                "total_stops": 0,
-            },
-        },
+        "meta": meta_payload,
         "fleet": {"trucks": 0, "vans": 0},
         "driver_profiles": [],
         "status": "manual",
@@ -943,6 +1145,7 @@ def plan_manual_save(payload: PublishPlanRequest, request: Request):
         deliveries=normalized_deliveries,
         force_refresh=force_refresh,
     )
+    normalized_deliveries = _canonical_plan_deliveries(normalized_deliveries)
     normalized_routes, normalized_driver_profiles = _normalize_route_driver_profiles(
         routes=payload.routes or [],
         meta=payload.meta or {},
@@ -958,13 +1161,14 @@ def plan_manual_save(payload: PublishPlanRequest, request: Request):
         force_refresh=force_refresh,
     )
 
-    meta_payload: Dict[str, Any] = dict(payload.meta or {})
-    if meta_payload.get("depot_lat") is None:
-        meta_payload["depot_lat"] = settings.DEPOT_LAT
-    if meta_payload.get("depot_lon") is None:
-        meta_payload["depot_lon"] = settings.DEPOT_LON
-    meta_payload["plan_date"] = plan_date
-    meta_payload["manual_metrics"] = summary
+    meta_payload = _build_manual_meta_payload(
+        payload.meta if isinstance(payload.meta, dict) else {},
+        plan_date=plan_date,
+        deliveries=normalized_deliveries,
+        routes=merged_routes,
+        fleet=payload.fleet if isinstance(payload.fleet, dict) else {},
+        summary=summary if isinstance(summary, dict) else {},
+    )
     if missing_coordinates:
         meta_payload["missing_delivery_coordinates"] = missing_coordinates
     else:
@@ -977,7 +1181,7 @@ def plan_manual_save(payload: PublishPlanRequest, request: Request):
             "routes": merged_routes,
             "deliveries": normalized_deliveries,
             "meta": meta_payload,
-            "fleet": payload.fleet or {},
+            "fleet": meta_payload.get("fleet") or payload.fleet or {},
             "driver_profiles": normalized_driver_profiles,
             "status": "manual",
             "updated_at": datetime.now(ZoneInfo("UTC")).isoformat(),
@@ -1398,11 +1602,8 @@ def plan_manual(request: Request, date: str | None = None):
         deliveries=normalized_deliveries,
         force_refresh=force_refresh,
     )
+    normalized_deliveries = _canonical_plan_deliveries(normalized_deliveries)
     meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
-    if meta.get("depot_lat") is None:
-        meta["depot_lat"] = settings.DEPOT_LAT
-    if meta.get("depot_lon") is None:
-        meta["depot_lon"] = settings.DEPOT_LON
 
     normalized_routes = _normalize_manual_routes_shape(payload.get("routes") or [])
     normalized_routes, summary, missing_coordinates = _recalculate_manual_routes(
@@ -1412,7 +1613,14 @@ def plan_manual(request: Request, date: str | None = None):
         depot_lon=meta.get("depot_lon"),
         force_refresh=force_refresh,
     )
-    meta["manual_metrics"] = summary
+    meta = _build_manual_meta_payload(
+        meta,
+        plan_date=plan_date,
+        deliveries=normalized_deliveries,
+        routes=normalized_routes,
+        fleet=payload.get("fleet") if isinstance(payload.get("fleet"), dict) else {},
+        summary=summary if isinstance(summary, dict) else {},
+    )
     if missing_coordinates:
         meta["missing_delivery_coordinates"] = missing_coordinates
     else:
@@ -1430,7 +1638,7 @@ def plan_manual(request: Request, date: str | None = None):
             "routes": normalized_routes,
             "deliveries": normalized_deliveries,
             "meta": meta,
-            "fleet": payload.get("fleet") or {},
+            "fleet": payload.get("fleet") or meta.get("fleet") or {},
             "driver_profiles": payload.get("driver_profiles") or [],
             "published_by": payload.get("updated_by"),
             "status": payload.get("status"),
@@ -1453,7 +1661,15 @@ def plan_manual_list(request: Request):
         fields = rec.get("fields", {}) if isinstance(rec, dict) else {}
         meta_raw = fields.get(settings.PUBLISHED_PLANS_META_FIELD)
         meta = svc._json_load(meta_raw, {}) if meta_raw not in (None, "") else {}
-        summary = meta.get("manual_metrics") if isinstance(meta, dict) and isinstance(meta.get("manual_metrics"), dict) else {}
+        summary = (
+            meta.get("manual_metrics")
+            if isinstance(meta, dict) and isinstance(meta.get("manual_metrics"), dict)
+            else {}
+        )
+        if not summary:
+            routes_raw = fields.get(settings.PUBLISHED_PLANS_ROUTES_FIELD)
+            routes = svc._json_load(routes_raw, []) if routes_raw not in (None, "") else []
+            summary = _route_metrics_summary(routes if isinstance(routes, list) else [])
         items.append(
             {
                 "record_id": rec.get("id"),
