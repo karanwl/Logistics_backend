@@ -749,6 +749,21 @@ def _matrix_node_count_for_deliveries(deliveries: list[dict]) -> int:
     return 1 + len(coords)
 
 
+def _missing_delivery_coordinate_ids(deliveries: list[dict]) -> list[str]:
+    missing: list[str] = []
+    for item in deliveries or []:
+        if not isinstance(item, dict):
+            continue
+        delivery_id = _text_or_empty(item.get("id") or item.get("delivery_id"))
+        if not delivery_id:
+            continue
+        lat = _to_float_safe(item.get("lat"))
+        lon = _to_float_safe(item.get("lon"))
+        if lat is None or lon is None or (abs(lat) < 1e-9 and abs(lon) < 1e-9):
+            missing.append(delivery_id)
+    return sorted(set(missing))
+
+
 def _coerce_fleet_payload(fleet: dict | None, routes: list[dict]) -> Dict[str, int]:
     trucks = _to_int_safe((fleet or {}).get("trucks") if isinstance(fleet, dict) else None, -1)
     vans = _to_int_safe((fleet or {}).get("vans") if isinstance(fleet, dict) else None, -1)
@@ -939,81 +954,6 @@ def _normalize_manual_routes_shape(routes: list[dict]) -> list[dict]:
     return normalized
 
 
-def _merge_routes_with_recalc(
-    base_routes: list[dict],
-    recalced_routes: list[dict] | None,
-) -> list[dict]:
-    updates_by_vehicle: Dict[str, Dict[str, Any]] = {}
-    updates_by_index: list[Dict[str, Any]] = []
-    for row in recalced_routes or []:
-        if not isinstance(row, dict):
-            continue
-        updates_by_index.append(row)
-        vehicle_key = _route_vehicle_key(row)
-        if vehicle_key:
-            updates_by_vehicle[vehicle_key] = row
-
-    merged: list[dict] = []
-    for idx, route in enumerate(base_routes or []):
-        if not isinstance(route, dict):
-            continue
-        item = dict(route)
-        route_key = _route_vehicle_key(item)
-        update = updates_by_vehicle.get(route_key) if route_key else None
-        if not update and idx < len(updates_by_index):
-            update = updates_by_index[idx]
-        if update:
-            item["total_distance_m"] = update.get("total_distance_m")
-            item["total_time_s"] = update.get("total_time_s")
-            item["stop_times"] = update.get("stop_times") or []
-            item["stop_nodes"] = update.get("stop_nodes") or []
-            if _text_or_empty(update.get("vehicle_type")):
-                item["vehicle_type"] = _text_or_empty(update.get("vehicle_type"))
-        merged.append(item)
-    return merged
-
-
-def _recalculate_manual_routes(
-    *,
-    routes: list[dict],
-    deliveries: list[dict],
-    depot_lat: Any,
-    depot_lon: Any,
-    force_refresh: bool,
-    strict: bool = False,
-) -> tuple[list[dict], dict[str, int], list[str]]:
-    if not routes:
-        return [], _route_metrics_summary([]), []
-
-    try:
-        recalc_result = recalculate_manual_plan(
-            routes=routes,
-            deliveries=deliveries,
-            depot_lat=depot_lat,
-            depot_lon=depot_lon,
-            force_refresh=force_refresh,
-        )
-    except Exception:
-        if strict:
-            raise
-        logger.warning("Manual route recalculation failed; preserving existing route timings.", exc_info=True)
-        return routes, _route_metrics_summary(routes), []
-
-    recalced_routes = recalc_result.get("routes") if isinstance(recalc_result, dict) else []
-    merged_routes = _merge_routes_with_recalc(routes, recalced_routes if isinstance(recalced_routes, list) else [])
-    summary = (
-        recalc_result.get("summary")
-        if isinstance(recalc_result, dict) and isinstance(recalc_result.get("summary"), dict)
-        else _route_metrics_summary(merged_routes)
-    )
-    missing_coordinates = (
-        recalc_result.get("missing_delivery_coordinates")
-        if isinstance(recalc_result, dict) and isinstance(recalc_result.get("missing_delivery_coordinates"), list)
-        else []
-    )
-    return merged_routes, summary, missing_coordinates
-
-
 def _build_manual_seed_payload(svc: DatabaseService, plan_date: str, force_refresh: bool) -> Dict[str, Any]:
     base = svc.build_delivery_plan_payload(plan_date, force_refresh=force_refresh)
     deliveries = _canonical_plan_deliveries([_normalize_plan_delivery(d) for d in (base.get("deliveries") or [])])
@@ -1159,20 +1099,14 @@ def plan_manual_save(payload: PublishPlanRequest, request: Request):
         svc=svc,
     )
     normalized_routes = _normalize_manual_routes_shape(normalized_routes)
-    merged_routes, summary, missing_coordinates = _recalculate_manual_routes(
-        routes=normalized_routes,
-        deliveries=normalized_deliveries,
-        depot_lat=(payload.meta or {}).get("depot_lat") if isinstance(payload.meta, dict) else None,
-        depot_lon=(payload.meta or {}).get("depot_lon") if isinstance(payload.meta, dict) else None,
-        force_refresh=force_refresh,
-        strict=True,
-    )
+    summary = _route_metrics_summary(normalized_routes)
+    missing_coordinates = _missing_delivery_coordinate_ids(normalized_deliveries)
 
     meta_payload = _build_manual_meta_payload(
         payload.meta if isinstance(payload.meta, dict) else {},
         plan_date=plan_date,
         deliveries=normalized_deliveries,
-        routes=merged_routes,
+        routes=normalized_routes,
         fleet=payload.fleet if isinstance(payload.fleet, dict) else {},
         summary=summary if isinstance(summary, dict) else {},
     )
@@ -1185,7 +1119,7 @@ def plan_manual_save(payload: PublishPlanRequest, request: Request):
         plan_date=plan_date,
         plan_type="manual",
         fields={
-            "routes": merged_routes,
+            "routes": normalized_routes,
             "deliveries": normalized_deliveries,
             "meta": meta_payload,
             "fleet": meta_payload.get("fleet") or payload.fleet or {},
@@ -1206,7 +1140,7 @@ def plan_manual_save(payload: PublishPlanRequest, request: Request):
             "manual_saved": True,
             "summary": summary,
             "missing_delivery_coordinates": missing_coordinates,
-            "routes": merged_routes,
+            "routes": normalized_routes,
         },
     )
     resp.headers["Cache-Control"] = "no-store"
@@ -1613,13 +1547,8 @@ def plan_manual(request: Request, date: str | None = None):
     meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
 
     normalized_routes = _normalize_manual_routes_shape(payload.get("routes") or [])
-    normalized_routes, summary, missing_coordinates = _recalculate_manual_routes(
-        routes=normalized_routes,
-        deliveries=normalized_deliveries,
-        depot_lat=meta.get("depot_lat"),
-        depot_lon=meta.get("depot_lon"),
-        force_refresh=force_refresh,
-    )
+    summary = _route_metrics_summary(normalized_routes)
+    missing_coordinates = _missing_delivery_coordinate_ids(normalized_deliveries)
     meta = _build_manual_meta_payload(
         meta,
         plan_date=plan_date,
