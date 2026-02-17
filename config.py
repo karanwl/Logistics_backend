@@ -45,7 +45,6 @@ class Settings(BaseModel):
     PHYSICAL_TRUCKS: int = _env_int("PHYSICAL_TRUCKS", "2")
     VEHICLE_CAPACITY_UNITS: int = _env_int("VEHICLE_CAPACITY_UNITS", "140")
     VAN_CAPACITY_UNITS: int = _env_int("VAN_CAPACITY_UNITS", "25")
-    # "Med Skid" replaces legacy "Skid" (aka long skid). Keep LONG_SKID_UNITS as fallback.
     MED_SKID_UNITS: int = _env_int("MED_SKID_UNITS", os.getenv("LONG_SKID_UNITS", "20"))
     LONG_SKID_UNITS: int = _env_int("LONG_SKID_UNITS", "20")
     LARGE_SKID_UNITS: int = _env_int("LARGE_SKID_UNITS", "25")
@@ -67,7 +66,7 @@ class Settings(BaseModel):
     SOLVER_DROP_NODE_PENALTY: int = _env_int("SOLVER_DROP_NODE_PENALTY", "1000000")
     SOLVER_SHIFT_SECONDS: int = _env_int("SOLVER_SHIFT_SECONDS", "28800")
     SOLVER_WAITING_SLACK_SECONDS: int = _env_int("SOLVER_WAITING_SLACK_SECONDS", "600")
-    SOLVER_TIME_LIMIT_SECONDS: int = _env_int("SOLVER_TIME_LIMIT_SECONDS", "60")
+    SOLVER_TIME_LIMIT_SECONDS: int = _env_int("SOLVER_TIME_LIMIT_SECONDS", "30")
     SOLVER_RELOAD_THRESHOLD_UNITS: int = _env_int(
         "SOLVER_RELOAD_THRESHOLD_UNITS",
         os.getenv("VEHICLE_CAPACITY_UNITS", "140"),

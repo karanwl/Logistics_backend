@@ -176,8 +176,7 @@ class RouteOptimizer:
 
     def _estimate_reload_count(self, truck_count: int | None = None) -> int:
         capacity = int(self.truck_capacity_units or 0)
-        reload_threshold = int(self.reload_threshold_units or 0)
-        if capacity <= 0 or reload_threshold <= 0:
+        if capacity <= 0:
             return 0
         if truck_count is None:
             truck_count = sum(1 for v in self.vehicle_types if v == "truck")
@@ -187,28 +186,26 @@ class RouteOptimizer:
 
         total_units = 0
         for node in range(1, self.base_node_count):
-            if self._node_requires_truck(node):
-                tokens = self.node_to_jobs.get(node, [])
-                for t in tokens:
-                    deliv_id, _, units = self._parse_token(t)
-                    d = self.delivery_by_id.get(deliv_id) if deliv_id else None
-                    pickup_flag = bool(self._delivery_field(d, "pickup", False)) if d else False
-                    if pickup_flag:
-                        continue
-                    if units:
-                        unit_val = int(units)
-                    elif d:
-                        unit_val = self._delivery_units(d)
-                    else:
-                        unit_val = 0
-                    total_units += max(0, int(unit_val))
+            tokens = self.node_to_jobs.get(node, [])
+            for t in tokens:
+                deliv_id, _, units = self._parse_token(t)
+                d = self.delivery_by_id.get(deliv_id) if deliv_id else None
+                pickup_flag = bool(self._delivery_field(d, "pickup", False)) if d else False
+                if pickup_flag:
+                    continue
+                if units:
+                    unit_val = int(units)
+                elif d:
+                    unit_val = self._delivery_units(d)
+                else:
+                    unit_val = 0
+                total_units += max(0, int(unit_val))
 
-        # A truck can carry one full load before any synthetic depot-reload stop is needed.
-        # Reloads are based on a threshold (defaults to truck capacity).
-        if total_units <= reload_threshold:
+        max_truck_capacity = int(truck_count * capacity)
+        if total_units <= max_truck_capacity:
             return 0
-        required_loads = int(math.ceil(total_units / reload_threshold))
-        return max(0, required_loads - 1)
+        required_loads = int(math.ceil(total_units / capacity))
+        return max(0, required_loads - truck_count)
 
     def _total_truck_only_units(self) -> int:
         total_units = 0
