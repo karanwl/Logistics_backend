@@ -182,6 +182,7 @@ class BulkCargoUpdateRequest(BaseModel):
 class BulkUpdateDeliveryItem(BaseModel):
     delivery_id: str
     ps_delivered: bool | None = None
+    scheduled_date: str | None = None
     med_skid: int | None = Field(default=None, ge=0)
     large_skid: int | None = Field(default=None, ge=0)
     small_skid: int | None = Field(default=None, ge=0)
@@ -194,6 +195,11 @@ class BulkUpdateDeliveryItem(BaseModel):
     pickup: bool | None = None
     pickup_vehicle: str | None = None
     requires_empty_truck: bool | None = None
+
+    @field_validator("scheduled_date")
+    @classmethod
+    def _validate_scheduled_date(cls, value):
+        return parse_iso_date(value, field_name="scheduled_date", allow_none=True, allow_empty=True)
 
 
 class BulkUpdateDeliveriesRequest(BaseModel):

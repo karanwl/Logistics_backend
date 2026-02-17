@@ -1100,6 +1100,7 @@ class DatabaseService:
 
     def bulk_update_deliveries_by_business_id(self, updates: list[Dict[str, Any]]) -> Dict[str, Any]:
         updated_ids: list[str] = []
+        unchanged_ids: list[str] = []
         errors: list[Dict[str, Any]] = []
 
         with SessionLocal() as session:
@@ -1113,46 +1114,103 @@ class DatabaseService:
                     errors.append({"delivery_id": delivery_id_raw, "error": "Delivery not found."})
                     continue
 
-                if "med_skid" in item:
-                    delivery.med_skid = self._coerce_int(item.get("med_skid"))
-                if "ps_delivered" in item:
-                    delivery.ps_delivered = self._to_bool(item.get("ps_delivered"))
-                if "skid" in item:
-                    delivery.med_skid = self._coerce_int(item.get("skid"))
-                if "small_skid" in item:
-                    delivery.small_skid = self._coerce_int(item.get("small_skid"))
-                if "large_skid" in item:
-                    delivery.large_skid = self._coerce_int(item.get("large_skid"))
-                if "pickup" in item:
-                    delivery.pickup = self._to_bool(item.get("pickup"))
-                if "pickup_vehicle" in item:
-                    delivery.pickup_vehicle = self._normalize_pickup_vehicle(item.get("pickup_vehicle"))
-                if "requires_empty_truck" in item:
-                    delivery.requires_empty_truck = self._to_bool(item.get("requires_empty_truck"))
-                if "door" in item:
-                    delivery.door = self._coerce_int(item.get("door"))
-                if "frame" in item:
-                    delivery.frame = self._coerce_int(item.get("frame"))
-                if "exp_frame" in item:
-                    delivery.exp_frame = self._coerce_int(item.get("exp_frame"))
-                if "box" in item:
-                    delivery.box = self._coerce_int(item.get("box"))
-                if "window_start" in item:
-                    value = item.get("window_start")
-                    delivery.window_start = self._first_str(value) if value not in (None, "") else None
-                if "window_end" in item:
-                    value = item.get("window_end")
-                    delivery.window_end = self._first_str(value) if value not in (None, "") else None
+                has_supported_field = False
+                changed = False
 
-                if hasattr(delivery, "updated_at"):
-                    delivery.updated_at = datetime.now(ZoneInfo("UTC"))
-                updated_ids.append(str(getattr(delivery, "delivery_id", "") or delivery_id_raw))
+                def _set_if_changed(attr: str, value: Any):
+                    nonlocal changed
+                    current = getattr(delivery, attr, None)
+                    if current != value:
+                        setattr(delivery, attr, value)
+                        changed = True
+
+                if "scheduled_date" in item:
+                    has_supported_field = True
+                    raw_date = item.get("scheduled_date")
+                    normalized_date = self._coerce_date(raw_date)
+                    if raw_date not in (None, "") and normalized_date is None:
+                        errors.append(
+                            {
+                                "delivery_id": delivery_id_raw,
+                                "error": "scheduled_date must be in YYYY-MM-DD format.",
+                            }
+                        )
+                        continue
+                    _set_if_changed("scheduled_date", normalized_date)
+
+                if "med_skid" in item:
+                    has_supported_field = True
+                    _set_if_changed("med_skid", self._coerce_int(item.get("med_skid")))
+                if "ps_delivered" in item:
+                    has_supported_field = True
+                    _set_if_changed("ps_delivered", self._to_bool(item.get("ps_delivered")))
+                if "skid" in item:
+                    has_supported_field = True
+                    _set_if_changed("med_skid", self._coerce_int(item.get("skid")))
+                if "small_skid" in item:
+                    has_supported_field = True
+                    _set_if_changed("small_skid", self._coerce_int(item.get("small_skid")))
+                if "large_skid" in item:
+                    has_supported_field = True
+                    _set_if_changed("large_skid", self._coerce_int(item.get("large_skid")))
+                if "pickup" in item:
+                    has_supported_field = True
+                    _set_if_changed("pickup", self._to_bool(item.get("pickup")))
+                if "pickup_vehicle" in item:
+                    has_supported_field = True
+                    _set_if_changed("pickup_vehicle", self._normalize_pickup_vehicle(item.get("pickup_vehicle")))
+                if "requires_empty_truck" in item:
+                    has_supported_field = True
+                    _set_if_changed("requires_empty_truck", self._to_bool(item.get("requires_empty_truck")))
+                if "door" in item:
+                    has_supported_field = True
+                    _set_if_changed("door", self._coerce_int(item.get("door")))
+                if "frame" in item:
+                    has_supported_field = True
+                    _set_if_changed("frame", self._coerce_int(item.get("frame")))
+                if "exp_frame" in item:
+                    has_supported_field = True
+                    _set_if_changed("exp_frame", self._coerce_int(item.get("exp_frame")))
+                if "box" in item:
+                    has_supported_field = True
+                    _set_if_changed("box", self._coerce_int(item.get("box")))
+                if "window_start" in item:
+                    has_supported_field = True
+                    value = item.get("window_start")
+                    _set_if_changed(
+                        "window_start",
+                        self._first_str(value) if value not in (None, "") else None,
+                    )
+                if "window_end" in item:
+                    has_supported_field = True
+                    value = item.get("window_end")
+                    _set_if_changed(
+                        "window_end",
+                        self._first_str(value) if value not in (None, "") else None,
+                    )
+
+                if not has_supported_field:
+                    errors.append(
+                        {
+                            "delivery_id": delivery_id_raw,
+                            "error": "No supported update fields provided.",
+                        }
+                    )
+                    continue
+
+                if changed:
+                    if hasattr(delivery, "updated_at"):
+                        delivery.updated_at = datetime.now(ZoneInfo("UTC"))
+                    updated_ids.append(str(getattr(delivery, "delivery_id", "") or delivery_id_raw))
+                else:
+                    unchanged_ids.append(str(getattr(delivery, "delivery_id", "") or delivery_id_raw))
             session.commit()
         if updated_ids:
             self._invalidate_cache("Deliveries")
 
         return {
             "updated": len(updated_ids),
+            "unchanged": len(unchanged_ids),
             "errors": errors,
         }
         
