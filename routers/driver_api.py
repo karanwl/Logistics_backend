@@ -1145,8 +1145,8 @@ async def upload_photo(
     if content_type and not content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="Only image uploads are allowed.")
 
-    raw_bytes = await file.read()
     max_bytes = max(1, int(settings.UPLOAD_MAX_MB)) * 1024 * 1024
+    raw_bytes = await file.read(max_bytes + 1)
     raw_size = len(raw_bytes)
     if raw_size > max_bytes:
         raise HTTPException(status_code=413, detail="File too large.")
