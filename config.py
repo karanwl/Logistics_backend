@@ -154,6 +154,7 @@ class Settings(BaseModel):
     UPLOAD_DIR: str = os.getenv("UPLOAD_DIR", "uploads")
     UPLOAD_MAX_MB: int = _env_int("UPLOAD_MAX_MB", "10")
     PHOTO_MAX_DIMENSION: int = _env_int("PHOTO_MAX_DIMENSION", "1920")
+    PHOTO_MAX_PIXELS: int = _env_int("PHOTO_MAX_PIXELS", "12000000")
     PHOTO_TARGET_MAX_BYTES: int = _env_int("PHOTO_TARGET_MAX_BYTES", "450000")
     PHOTO_MAX_QUALITY: int = _env_int("PHOTO_MAX_QUALITY", "82")
     PHOTO_MIN_QUALITY: int = _env_int("PHOTO_MIN_QUALITY", "52")

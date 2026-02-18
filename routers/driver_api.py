@@ -1,6 +1,7 @@
 import json
 import io
 import logging
+import os
 import uuid
 from functools import lru_cache
 from datetime import datetime, timezone
@@ -195,6 +196,26 @@ def _s3_client():
         kwargs["region_name"] = region
     if endpoint:
         kwargs["endpoint_url"] = endpoint
+
+    # Defensive parsing for env formatting mistakes (e.g., concatenated secrets).
+    def _clean_aws_env(name: str) -> str:
+        raw = str(os.getenv(name, "") or "").strip().strip("'").strip('"')
+        if not raw:
+            return ""
+        token = raw.splitlines()[0].strip()
+        if " " in token:
+            token = token.split()[0].strip()
+        return token
+
+    access_key = _clean_aws_env("AWS_ACCESS_KEY_ID")
+    secret_key = _clean_aws_env("AWS_SECRET_ACCESS_KEY")
+    session_token = _clean_aws_env("AWS_SESSION_TOKEN")
+    if access_key and secret_key:
+        kwargs["aws_access_key_id"] = access_key
+        kwargs["aws_secret_access_key"] = secret_key
+    if session_token:
+        kwargs["aws_session_token"] = session_token
+
     return boto3.client("s3", **kwargs)
 
 
@@ -253,12 +274,23 @@ def _compress_image(raw_bytes: bytes) -> tuple[bytes, str, str]:
     try:
         with Image.open(io.BytesIO(raw_bytes)) as image:
             image = ImageOps.exif_transpose(image)
-            rgba = image.convert("RGBA")
+            width, height = image.size
+            max_pixels = max(1_000_000, int(settings.PHOTO_MAX_PIXELS))
+            if width * height > max_pixels:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"Image is too large. Max pixels allowed: {max_pixels}.",
+                )
+            bands = image.getbands()
+            has_alpha = "A" in bands
+            if has_alpha:
+                rgba = image.convert("RGBA")
+                canvas = Image.new("RGB", rgba.size, (255, 255, 255))
+                canvas.paste(rgba, mask=rgba.split()[-1])
+            else:
+                canvas = image.convert("RGB")
     except (UnidentifiedImageError, OSError):
         raise HTTPException(status_code=400, detail="Invalid image file.")
-
-    canvas = Image.new("RGB", rgba.size, (255, 255, 255))
-    canvas.paste(rgba, mask=rgba.split()[-1])
 
     max_dim = max(640, int(settings.PHOTO_MAX_DIMENSION))
     if max(canvas.size) > max_dim:
@@ -274,17 +306,7 @@ def _compress_image(raw_bytes: bytes) -> tuple[bytes, str, str]:
     for _round in range(4):
         for quality in range(max_quality, min_quality - 1, -6):
             out = io.BytesIO()
-            try:
-                current.save(
-                    out,
-                    format="JPEG",
-                    quality=quality,
-                    optimize=True,
-                    progressive=True,
-                )
-            except OSError:
-                out = io.BytesIO()
-                current.save(out, format="JPEG", quality=quality)
+            current.save(out, format="JPEG", quality=quality)
             data = out.getvalue()
             if not best or len(data) < len(best):
                 best = data
@@ -1125,10 +1147,12 @@ async def upload_photo(
 
     raw_bytes = await file.read()
     max_bytes = max(1, int(settings.UPLOAD_MAX_MB)) * 1024 * 1024
-    if len(raw_bytes) > max_bytes:
+    raw_size = len(raw_bytes)
+    if raw_size > max_bytes:
         raise HTTPException(status_code=413, detail="File too large.")
 
     optimized, optimized_content_type, optimized_ext = _compress_image(raw_bytes)
+    raw_bytes = b""
     photo_ref = _upload_photo_to_s3(delivery_id, optimized, optimized_content_type, optimized_ext)
 
     svc = DatabaseService()
@@ -1154,7 +1178,7 @@ async def upload_photo(
             "url": _photo_ref_to_url(photo_ref),
             "filename": str(file.filename or ""),
             "bytes": len(optimized),
-            "original_bytes": len(raw_bytes),
+            "original_bytes": raw_size,
         },
     )
     resp.headers["Cache-Control"] = "no-store"
