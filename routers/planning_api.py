@@ -54,6 +54,40 @@ def _require_manager_admin(request: Request):
     return user
 
 
+def _delivery_photo_field_name() -> str:
+    return str(settings.DELIVERIES_PHOTO_URLS_FIELD or "").strip() or "Photo URLs"
+
+
+def _parse_photo_urls(value: object) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        out: list[str] = []
+        for item in value:
+            if isinstance(item, str):
+                candidate = item.strip()
+                if candidate:
+                    out.append(candidate)
+                continue
+            if isinstance(item, dict):
+                candidate = str(item.get("url") or item.get("href") or "").strip()
+                if candidate:
+                    out.append(candidate)
+        return out
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return []
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            parsed = None
+        if isinstance(parsed, list):
+            return _parse_photo_urls(parsed)
+        return [raw]
+    return []
+
+
 @router.get("/me")
 def current_user(request: Request):
     user = get_current_user(request)
@@ -1536,6 +1570,9 @@ def delivery_get(delivery_id: str, request: Request):
         "requires_empty_truck": bool(fields.get("Requires Empty Truck")),
         "window_start": fields.get("Window Start") or "",
         "window_end": fields.get("Window End") or "",
+        "status": fields.get(settings.DELIVERIES_STATUS_FIELD) or "",
+        "driver_notes": fields.get(settings.DELIVERIES_DRIVER_NOTES_FIELD) or "",
+        "photo_urls": _parse_photo_urls(fields.get(_delivery_photo_field_name())),
     }
     resp = ok_response(request, {"delivery": payload, "jobsites": jobsites})
     resp.headers["Cache-Control"] = "no-store"

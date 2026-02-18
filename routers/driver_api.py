@@ -1,10 +1,14 @@
 import json
+import io
 import logging
-import os
 import uuid
+from functools import lru_cache
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, HTTPException, UploadFile, File
+import boto3
+from botocore.exceptions import BotoCoreError, ClientError
+from fastapi import APIRouter, HTTPException, UploadFile, File, Form
+from PIL import Image, ImageOps, UnidentifiedImageError
 from pydantic import BaseModel, Field
 from starlette.requests import Request
 
@@ -164,6 +168,169 @@ def _parse_photo_urls(value: object) -> list[str]:
         return [raw]
 
     return []
+
+
+def _delivery_photo_field_name() -> str:
+    return str(settings.DELIVERIES_PHOTO_URLS_FIELD or "").strip() or "Photo URLs"
+
+
+def _dedupe_photo_refs(values: list[str]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        normalized = str(value or "").strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        out.append(normalized)
+    return out
+
+
+@lru_cache(maxsize=1)
+def _s3_client():
+    kwargs = {}
+    region = str(settings.S3_REGION or "").strip()
+    endpoint = str(settings.S3_ENDPOINT_URL or "").strip()
+    if region:
+        kwargs["region_name"] = region
+    if endpoint:
+        kwargs["endpoint_url"] = endpoint
+    return boto3.client("s3", **kwargs)
+
+
+def _s3_public_url(bucket: str, key: str) -> str:
+    public_base = str(settings.S3_PUBLIC_BASE_URL or "").strip().rstrip("/")
+    if public_base:
+        return f"{public_base}/{key.lstrip('/')}"
+    return ""
+
+
+def _photo_ref_to_url(photo_ref: str) -> str:
+    ref = str(photo_ref or "").strip()
+    if not ref:
+        return ""
+    if ref.startswith(("http://", "https://", "/uploads/")):
+        return ref
+
+    bucket = str(settings.S3_BUCKET or "").strip()
+    key = ref.lstrip("/")
+
+    if ref.startswith("s3://"):
+        _, _, raw = ref.partition("s3://")
+        parsed_bucket, _, parsed_key = raw.partition("/")
+        if parsed_bucket and parsed_key:
+            bucket = parsed_bucket
+            key = parsed_key
+
+    if not bucket or not key:
+        return ref
+
+    public_url = _s3_public_url(bucket, key)
+    if public_url:
+        return public_url
+
+    try:
+        ttl = max(60, int(settings.S3_SIGNED_URL_TTL_SECONDS))
+        return _s3_client().generate_presigned_url(
+            "get_object",
+            Params={"Bucket": bucket, "Key": key},
+            ExpiresIn=ttl,
+        )
+    except Exception:
+        logger.warning("Failed to generate signed URL for key=%s", key, exc_info=True)
+        return ref
+
+
+def _photo_urls_for_response(value: object) -> list[str]:
+    refs = _parse_photo_urls(value)
+    return [url for url in (_photo_ref_to_url(ref) for ref in refs) if url]
+
+
+def _compress_image(raw_bytes: bytes) -> tuple[bytes, str, str]:
+    if not raw_bytes:
+        raise HTTPException(status_code=400, detail="Missing file bytes.")
+
+    try:
+        with Image.open(io.BytesIO(raw_bytes)) as image:
+            image = ImageOps.exif_transpose(image)
+            rgba = image.convert("RGBA")
+    except (UnidentifiedImageError, OSError):
+        raise HTTPException(status_code=400, detail="Invalid image file.")
+
+    canvas = Image.new("RGB", rgba.size, (255, 255, 255))
+    canvas.paste(rgba, mask=rgba.split()[-1])
+
+    max_dim = max(640, int(settings.PHOTO_MAX_DIMENSION))
+    if max(canvas.size) > max_dim:
+        resampling = Image.Resampling.LANCZOS if hasattr(Image, "Resampling") else Image.LANCZOS
+        canvas.thumbnail((max_dim, max_dim), resampling)
+
+    target_bytes = max(150_000, int(settings.PHOTO_TARGET_MAX_BYTES))
+    min_quality = max(35, min(95, int(settings.PHOTO_MIN_QUALITY)))
+    max_quality = max(min_quality, min(95, int(settings.PHOTO_MAX_QUALITY)))
+    best: bytes | None = None
+
+    current = canvas
+    for _round in range(4):
+        for quality in range(max_quality, min_quality - 1, -6):
+            out = io.BytesIO()
+            try:
+                current.save(
+                    out,
+                    format="JPEG",
+                    quality=quality,
+                    optimize=True,
+                    progressive=True,
+                )
+            except OSError:
+                out = io.BytesIO()
+                current.save(out, format="JPEG", quality=quality)
+            data = out.getvalue()
+            if not best or len(data) < len(best):
+                best = data
+            if len(data) <= target_bytes:
+                return data, "image/jpeg", ".jpg"
+
+        width, height = current.size
+        if min(width, height) <= 900:
+            break
+        resized = current.copy()
+        resampling = Image.Resampling.LANCZOS if hasattr(Image, "Resampling") else Image.LANCZOS
+        resized.thumbnail((int(width * 0.85), int(height * 0.85)), resampling)
+        current = resized
+
+    if not best:
+        raise HTTPException(status_code=400, detail="Invalid image file.")
+    return best, "image/jpeg", ".jpg"
+
+
+def _upload_photo_to_s3(delivery_id: str, data: bytes, content_type: str, extension: str) -> str:
+    bucket = str(settings.S3_BUCKET or "").strip()
+    if not bucket:
+        raise HTTPException(status_code=503, detail="Photo storage is not configured.")
+
+    prefix = str(settings.S3_UPLOAD_PREFIX or "").strip().strip("/")
+    safe_delivery = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in str(delivery_id or "").strip())
+    safe_delivery = safe_delivery or "unknown"
+    stamp = datetime.now(timezone.utc)
+    file_name = f"{uuid.uuid4().hex}{extension}"
+    parts = [part for part in [prefix, safe_delivery, stamp.strftime("%Y/%m/%d"), file_name] if part]
+    key = "/".join(parts)
+
+    try:
+        _s3_client().put_object(
+            Bucket=bucket,
+            Key=key,
+            Body=data,
+            ContentType=content_type,
+            CacheControl="public,max-age=31536000,immutable",
+            ContentDisposition="inline",
+        )
+    except (BotoCoreError, ClientError):
+        logger.warning("Failed S3 upload for delivery_id=%s key=%s", delivery_id, key, exc_info=True)
+        raise HTTPException(status_code=502, detail="Failed to store photo.")
+
+    return key
 
 
 def _driver_notes_value(fields: dict) -> str | None:
@@ -866,7 +1033,7 @@ def driver_delivery_detail(delivery_id: str, request: Request):
         assigned_driver=str(fields.get(settings.DELIVERIES_DRIVER_FIELD) or "").strip() or None,
         status=_status_field_value(fields) or None,
         driver_notes=_driver_notes_value(fields),
-        photo_urls=_parse_photo_urls(fields.get(settings.DELIVERIES_PHOTO_URLS_FIELD)),
+        photo_urls=_photo_urls_for_response(fields.get(_delivery_photo_field_name())),
         status_updated_at=str(fields.get(settings.DELIVERIES_STATUS_UPDATED_FIELD) or "").strip() or None,
     )
 
@@ -906,12 +1073,13 @@ def update_delivery_status(delivery_id: str, payload: DriverStatusUpdate, reques
         notes = f"[status:{status}] {notes_input}".strip()
     if notes and settings.DELIVERIES_DRIVER_NOTES_FIELD:
         fields[settings.DELIVERIES_DRIVER_NOTES_FIELD] = notes
+    svc = DatabaseService()
     if photo_urls:
-        if settings.DELIVERIES_PHOTO_URLS_FIELD:
-            if settings.DELIVERIES_PHOTO_ATTACHMENTS:
-                fields[settings.DELIVERIES_PHOTO_URLS_FIELD] = [{"url": u} for u in photo_urls]
-            else:
-                fields[settings.DELIVERIES_PHOTO_URLS_FIELD] = json.dumps(photo_urls, separators=(",", ":"))
+        current = svc.get_delivery_by_business_id(delivery_id)
+        existing = _parse_photo_urls((current or {}).get("fields", {}).get(_delivery_photo_field_name()))
+        merged = _dedupe_photo_refs(existing + photo_urls)
+        if merged:
+            fields[_delivery_photo_field_name()] = json.dumps(merged, separators=(",", ":"))
     if timestamp and settings.DELIVERIES_STATUS_UPDATED_FIELD:
         fields[settings.DELIVERIES_STATUS_UPDATED_FIELD] = timestamp
     if status.lower() == "arrived" and settings.DELIVERIES_ARRIVED_AT_FIELD:
@@ -929,7 +1097,6 @@ def update_delivery_status(delivery_id: str, payload: DriverStatusUpdate, reques
     if not fields:
         raise HTTPException(status_code=400, detail="No fields to update.")
 
-    svc = DatabaseService()
     updated = svc.update_delivery_by_business_id(delivery_id, fields)
     if not updated:
         raise HTTPException(status_code=404, detail="Delivery not found.")
@@ -940,8 +1107,15 @@ def update_delivery_status(delivery_id: str, payload: DriverStatusUpdate, reques
 
 
 @router.post("/uploads/photo")
-async def upload_photo(request: Request, file: UploadFile = File(...)):
+async def upload_photo(
+    request: Request,
+    delivery_id: str = Form(...),
+    file: UploadFile = File(...),
+):
     _require_driver(request)
+    delivery_id = str(delivery_id or "").strip()
+    if not delivery_id:
+        raise HTTPException(status_code=400, detail="Missing delivery id.")
     if not file or not file.filename:
         raise HTTPException(status_code=400, detail="Missing file.")
 
@@ -949,31 +1123,39 @@ async def upload_photo(request: Request, file: UploadFile = File(...)):
     if content_type and not content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="Only image uploads are allowed.")
 
-    os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
-    ext = os.path.splitext(file.filename)[1].lower()
-    if not ext:
-        ext = ".jpg" if content_type.endswith("jpeg") else ".png"
-    filename = f"{uuid.uuid4().hex}{ext}"
-    target_path = os.path.join(settings.UPLOAD_DIR, filename)
-
+    raw_bytes = await file.read()
     max_bytes = max(1, int(settings.UPLOAD_MAX_MB)) * 1024 * 1024
-    total = 0
-    with open(target_path, "wb") as out:
-        while True:
-            chunk = await file.read(1024 * 1024)
-            if not chunk:
-                break
-            total += len(chunk)
-            if total > max_bytes:
-                out.close()
-                try:
-                    os.remove(target_path)
-                except OSError:
-                    logger.warning("Failed to remove oversized upload %s", target_path, exc_info=True)
-                raise HTTPException(status_code=413, detail="File too large.")
-            out.write(chunk)
+    if len(raw_bytes) > max_bytes:
+        raise HTTPException(status_code=413, detail="File too large.")
 
-    url_path = f"/uploads/{filename}"
-    resp = ok_response(request, {"ok": True, "url": url_path, "filename": filename, "bytes": total})
+    optimized, optimized_content_type, optimized_ext = _compress_image(raw_bytes)
+    photo_ref = _upload_photo_to_s3(delivery_id, optimized, optimized_content_type, optimized_ext)
+
+    svc = DatabaseService()
+    current = svc.get_delivery_by_business_id(delivery_id)
+    if not current:
+        raise HTTPException(status_code=404, detail="Delivery not found.")
+
+    existing = _parse_photo_urls((current or {}).get("fields", {}).get(_delivery_photo_field_name()))
+    merged = _dedupe_photo_refs(existing + [photo_ref])
+    updated = svc.update_delivery_by_business_id(
+        delivery_id,
+        {_delivery_photo_field_name(): json.dumps(merged, separators=(",", ":"))},
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="Delivery not found.")
+
+    resp = ok_response(
+        request,
+        {
+            "ok": True,
+            "delivery_id": delivery_id,
+            "photo_ref": photo_ref,
+            "url": _photo_ref_to_url(photo_ref),
+            "filename": str(file.filename or ""),
+            "bytes": len(optimized),
+            "original_bytes": len(raw_bytes),
+        },
+    )
     resp.headers["Cache-Control"] = "no-store"
     return resp

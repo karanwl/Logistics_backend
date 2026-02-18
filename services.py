@@ -309,6 +309,45 @@ class DatabaseService:
     def _normalize_email(value: str | None) -> str:
         return str(value or "").strip().lower()
 
+    @staticmethod
+    def _delivery_photo_field_names() -> tuple[str, ...]:
+        configured = str(settings.DELIVERIES_PHOTO_URLS_FIELD or "").strip()
+        if configured and configured != "Photo URLs":
+            return configured, "Photo URLs"
+        if configured:
+            return (configured,)
+        return ("Photo URLs",)
+
+    @staticmethod
+    def _normalize_photo_refs(value: Any) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, list):
+            out: list[str] = []
+            for item in value:
+                if isinstance(item, str):
+                    candidate = item.strip()
+                    if candidate:
+                        out.append(candidate)
+                    continue
+                if isinstance(item, dict):
+                    candidate = str(item.get("url") or item.get("href") or "").strip()
+                    if candidate:
+                        out.append(candidate)
+            return out
+        if isinstance(value, str):
+            raw = value.strip()
+            if not raw:
+                return []
+            try:
+                parsed = json.loads(raw)
+            except Exception:
+                parsed = None
+            if isinstance(parsed, list):
+                return DatabaseService._normalize_photo_refs(parsed)
+            return [raw]
+        return []
+
     def _jobsite_record(self, jobsite: Jobsite) -> Dict[str, Any]:
         fields = {
             "Job ID": jobsite.job_id,
@@ -325,6 +364,8 @@ class DatabaseService:
         scheduled = delivery.scheduled_date.isoformat() if delivery.scheduled_date else None
         job_id = delivery.job_id
         job_ids = [str(job_id)] if job_id is not None else []
+        photo_field_name = str(settings.DELIVERIES_PHOTO_URLS_FIELD or "").strip() or "Photo URLs"
+        photo_refs = self._normalize_photo_refs(getattr(delivery, "photo_urls", None))
         status_updated_at = (
             delivery.status_updated_at.isoformat()
             if isinstance(delivery.status_updated_at, datetime)
@@ -371,6 +412,7 @@ class DatabaseService:
             settings.DELIVERIES_DRIVER_LAT_FIELD: getattr(delivery, "driver_latitude", None),
             settings.DELIVERIES_DRIVER_LON_FIELD: getattr(delivery, "driver_longitude", None),
             settings.DELIVERIES_DRIVER_NOTES_FIELD: delivery.delivery_notes,
+            photo_field_name: json.dumps(photo_refs, separators=(",", ":")) if photo_refs else None,
             "Window Start": delivery.window_start,
             "Window End": delivery.window_end,
             settings.DELIVERIES_PACKING_SLIP_FIELD: delivery.packing_slip,
@@ -900,6 +942,9 @@ class DatabaseService:
                 delivery.driver_longitude = self._coerce_float(value)
             elif key == settings.DELIVERIES_DRIVER_NOTES_FIELD:
                 delivery.delivery_notes = self._first_str(value) if value is not None else None
+            elif key in self._delivery_photo_field_names():
+                refs = self._normalize_photo_refs(value)
+                delivery.photo_urls = json.dumps(refs, separators=(",", ":")) if refs else None
             elif key == "Window Start":
                 delivery.window_start = self._first_str(value) if value not in (None, "") else None
             elif key == "Window End":

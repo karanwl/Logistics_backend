@@ -55,6 +55,7 @@ class Delivery(Base):
     window_start = Column("window_start", Text)
     window_end = Column("window_end", Text)
     delivery_notes = Column("delivery_notes", Text)
+    photo_urls = Column("photo_urls", Text)
     custom_stop = Column("custom_stop", Boolean)
     custom_stop_label = Column("custom_stop_label", Text)
     created_at = Column("created_at", DateTime(timezone=True))

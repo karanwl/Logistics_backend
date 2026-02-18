@@ -9,3 +9,5 @@ SQLAlchemy==2.0.30
 alembic==1.13.2
 psycopg[binary]==3.2.3
 psycopg2-binary
+boto3==1.37.4
+Pillow==11.1.0

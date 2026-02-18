@@ -144,7 +144,7 @@ class Settings(BaseModel):
     DELIVERIES_STATUS_UPDATED_FIELD: str = os.getenv("DELIVERIES_STATUS_UPDATED_FIELD", "Status Updated At")
     DELIVERIES_DRIVER_NOTES_FIELD: str = os.getenv("DELIVERIES_DRIVER_NOTES_FIELD", "Delivery Notes")
     DELIVERIES_PICKUP_VEHICLE_FIELD: str = os.getenv("DELIVERIES_PICKUP_VEHICLE_FIELD", "Pickup Vehicle")
-    DELIVERIES_PHOTO_URLS_FIELD: str = os.getenv("DELIVERIES_PHOTO_URLS_FIELD", "")
+    DELIVERIES_PHOTO_URLS_FIELD: str = os.getenv("DELIVERIES_PHOTO_URLS_FIELD", "Photo URLs")
     DELIVERIES_PHOTO_ATTACHMENTS: bool = _env_bool("DELIVERIES_PHOTO_ATTACHMENTS", "false")
     DELIVERIES_ARRIVED_AT_FIELD: str = os.getenv("DELIVERIES_ARRIVED_AT_FIELD", "Arrived At")
     DELIVERIES_DELIVERED_AT_FIELD: str = os.getenv("DELIVERIES_DELIVERED_AT_FIELD", "Delivered At")
@@ -153,6 +153,17 @@ class Settings(BaseModel):
 
     UPLOAD_DIR: str = os.getenv("UPLOAD_DIR", "uploads")
     UPLOAD_MAX_MB: int = _env_int("UPLOAD_MAX_MB", "10")
+    PHOTO_MAX_DIMENSION: int = _env_int("PHOTO_MAX_DIMENSION", "1920")
+    PHOTO_TARGET_MAX_BYTES: int = _env_int("PHOTO_TARGET_MAX_BYTES", "450000")
+    PHOTO_MAX_QUALITY: int = _env_int("PHOTO_MAX_QUALITY", "82")
+    PHOTO_MIN_QUALITY: int = _env_int("PHOTO_MIN_QUALITY", "52")
+
+    S3_BUCKET: str = os.getenv("S3_BUCKET", "")
+    S3_REGION: str = os.getenv("S3_REGION", "")
+    S3_ENDPOINT_URL: str = os.getenv("S3_ENDPOINT_URL", "")
+    S3_UPLOAD_PREFIX: str = os.getenv("S3_UPLOAD_PREFIX", "delivery-photos")
+    S3_PUBLIC_BASE_URL: str = os.getenv("S3_PUBLIC_BASE_URL", "")
+    S3_SIGNED_URL_TTL_SECONDS: int = _env_int("S3_SIGNED_URL_TTL_SECONDS", "3600")
 
     # Optional: where coordinates live in Jobsites (if you use them)
     JOBSITES_LAT_FIELD: str = os.getenv("JOBSITES_LAT_FIELD", "Latitude")
