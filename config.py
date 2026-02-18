@@ -26,11 +26,11 @@ class Settings(BaseModel):
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
     AUTH_DEBUG: bool = _env_bool("AUTH_DEBUG", "true")
 
-    DATABASE_URL: str = os.getenv("DATABASE_URL", "postgresql://neondb_owner:npg_4p2cSfwajsKt@ep-calm-mud-ah28l0je-pooler.c-3.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require")
+    DATABASE_URL: str = os.getenv("DATABASE_URL", "")
     DB_POOL_SIZE: int = _env_int("DB_POOL_SIZE", "5")
     DB_MAX_OVERFLOW: int = _env_int("DB_MAX_OVERFLOW", "10")
 
-    MAPBOX_TOKEN: str = os.getenv("MAPBOX_TOKEN", "pk.eyJ1Ijoia2FyYW53bCIsImEiOiJjbWtwdms0cXYwbHBnM2twcGVoOHc0eDc4In0.E5jVqwGUtKnwMR10E1pg5w")
+    MAPBOX_TOKEN: str = os.getenv("MAPBOX_TOKEN", "")
     MATRIX_VALIDATE_WITH_HAVERSINE: bool = _env_bool("MATRIX_VALIDATE_WITH_HAVERSINE", "true")
     MATRIX_HAVERSINE_FACTOR: float = _env_float("MATRIX_HAVERSINE_FACTOR", "4.0")
     MATRIX_RAW_HAVERSINE_FACTOR_THRESHOLD: float = _env_float("MATRIX_RAW_HAVERSINE_FACTOR_THRESHOLD", "1.6")
