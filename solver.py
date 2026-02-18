@@ -84,7 +84,6 @@ class RouteOptimizer:
         return {
             "truck_cost_factor": float(settings.SOLVER_TRUCK_COST_FACTOR),
             "truck_time_factor": float(settings.SOLVER_TRUCK_TIME_FACTOR),
-            "truck_serve_van_eligible_penalty": int(settings.SOLVER_TRUCK_SERVE_VAN_ELIGIBLE_PENALTY),
             "time_span_cost_coeff": int(settings.SOLVER_TIME_SPAN_COST_COEFFICIENT),
             "downtown_soft_latest_s": int(settings.SOLVER_DOWNTOWN_SOFT_LATEST_SECONDS),
             "downtown_hard_latest_s": int(settings.SOLVER_DOWNTOWN_HARD_LATEST_SECONDS),
