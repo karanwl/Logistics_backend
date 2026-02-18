@@ -179,12 +179,19 @@ async def csrf_cookie_middleware(request, call_next):
 
 @app.middleware("http")
 async def security_headers_middleware(request, call_next):
-    request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+    request_id = (
+        request.headers.get("X-Request-ID")
+        or request.headers.get("x-request-id")
+        or request.headers.get("X-Correlation-ID")
+        or request.headers.get("x-correlation-id")
+        or ""
+    ).strip() or str(uuid.uuid4())
     request.state.request_id = request_id
     start = time.perf_counter()
     response = await call_next(request)
     elapsed_ms = int((time.perf_counter() - start) * 1000)
     response.headers["X-Request-ID"] = request_id
+    response.headers["x-correlation-id"] = request_id
     response.headers["X-Response-Time-Ms"] = str(elapsed_ms)
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "SAMEORIGIN"
