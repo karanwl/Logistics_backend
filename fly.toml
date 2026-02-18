@@ -4,7 +4,7 @@
 #
 
 app = 'logistics-backend-6f0pea'
-primary_region = 'yyz'
+primary_region = 'lax'
 
 [build]
 
