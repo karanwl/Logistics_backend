@@ -226,6 +226,18 @@ def _s3_public_url(bucket: str, key: str) -> str:
     return ""
 
 
+def _s3_endpoint_fallback_url(bucket: str, key: str) -> str:
+    cleaned_key = key.lstrip("/")
+    endpoint = str(settings.S3_ENDPOINT_URL or "").strip().rstrip("/")
+    if endpoint:
+        return f"{endpoint}/{bucket}/{cleaned_key}"
+
+    region = str(settings.S3_REGION or "").strip().lower()
+    if not region or region == "us-east-1":
+        return f"https://{bucket}.s3.amazonaws.com/{cleaned_key}"
+    return f"https://{bucket}.s3.{region}.amazonaws.com/{cleaned_key}"
+
+
 def _photo_ref_to_url(photo_ref: str) -> str:
     ref = str(photo_ref or "").strip()
     if not ref:
@@ -259,7 +271,8 @@ def _photo_ref_to_url(photo_ref: str) -> str:
         )
     except Exception:
         logger.warning("Failed to generate signed URL for key=%s", key, exc_info=True)
-        return ref
+        fallback = _s3_endpoint_fallback_url(bucket, key)
+        return fallback or ref
 
 
 def _photo_urls_for_response(value: object) -> list[str]:
