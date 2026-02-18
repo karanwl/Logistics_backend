@@ -52,23 +52,24 @@ class Settings(BaseModel):
     FRAME_UNITS: int = _env_int("FRAME_UNITS", "1")
 
     # --- Solver tuning knobs ---
-    SOLVER_TRUCK_COST_FACTOR: float = _env_float("SOLVER_TRUCK_COST_FACTOR", "1.12")
-    SOLVER_TRUCK_TIME_FACTOR: float = _env_float("SOLVER_TRUCK_TIME_FACTOR", "1.08")
+    SOLVER_TRUCK_COST_FACTOR: float = _env_float("SOLVER_TRUCK_COST_FACTOR", "1.10")
+    SOLVER_TRUCK_TIME_FACTOR: float = _env_float("SOLVER_TRUCK_TIME_FACTOR", "1.10")
 
-    SOLVER_TRUCK_SERVE_VAN_ELIGIBLE_PENALTY: int = _env_int("SOLVER_TRUCK_SERVE_VAN_ELIGIBLE_PENALTY", "0")
-    
-    SOLVER_TIME_SPAN_COST_COEFFICIENT: int = _env_int("SOLVER_TIME_SPAN_COST_COEFFICIENT", "5")
+    SOLVER_TIME_SPAN_COST_COEFFICIENT: int = _env_int("SOLVER_TIME_SPAN_COST_COEFFICIENT", "50")
     
     SOLVER_DOWNTOWN_SOFT_LATEST_SECONDS: int = _env_int("SOLVER_DOWNTOWN_SOFT_LATEST_SECONDS", "14400")
     SOLVER_DOWNTOWN_HARD_LATEST_SECONDS: int = _env_int("SOLVER_DOWNTOWN_HARD_LATEST_SECONDS", "21600")
     
     SOLVER_DOWNTOWN_LATE_PENALTY_PER_SECOND: int = _env_int("SOLVER_DOWNTOWN_LATE_PENALTY_PER_SECOND", "30")
     
-    SOLVER_VAN_FIXED_COST: int = _env_int("SOLVER_VAN_FIXED_COST", "2500")
-    SOLVER_TRUCK_FIXED_COST_PHYSICAL: int = _env_int("SOLVER_TRUCK_FIXED_COST_PHYSICAL", "5000")
-    SOLVER_TRUCK_FIXED_COST_OVERFLOW: int = _env_int("SOLVER_TRUCK_FIXED_COST_OVERFLOW", "60000")
+    # Vehicle-count-first objective: keep both physical vehicle types expensive and similar
+    # so the solver minimizes number of used vehicles before route-shape details.
+    SOLVER_VAN_FIXED_COST: int = _env_int("SOLVER_VAN_FIXED_COST", "200000")
+    SOLVER_TRUCK_FIXED_COST_PHYSICAL: int = _env_int("SOLVER_TRUCK_FIXED_COST_PHYSICAL", "200000")
+    SOLVER_TRUCK_FIXED_COST_OVERFLOW: int = _env_int("SOLVER_TRUCK_FIXED_COST_OVERFLOW", "1000000")
 
-    SOLVER_DROP_NODE_PENALTY: int = _env_int("SOLVER_DROP_NODE_PENALTY", "1000000")
+    # Must stay much larger than per-vehicle fixed costs to avoid dropping work.
+    SOLVER_DROP_NODE_PENALTY: int = _env_int("SOLVER_DROP_NODE_PENALTY", "20000000")
     
     SOLVER_VAN_FRAME_LIMIT: int = _env_int("SOLVER_VAN_FRAME_LIMIT", "3")
     SOLVER_VAN_DOOR_LIMIT: int = _env_int("SOLVER_VAN_DOOR_LIMIT", "3")
