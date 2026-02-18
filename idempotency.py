@@ -16,6 +16,7 @@ from db import SessionLocal
 from db_models import IdempotencyKey
 
 logger = logging.getLogger(__name__)
+_IDEMPOTENCY_DISABLED = False
 
 
 def _now_utc() -> datetime:
@@ -33,6 +34,15 @@ def _fingerprint(payload: Any) -> str:
 
 def _normalize_key(value: str | None) -> str:
     return str(value or "").strip()
+
+
+def _is_missing_table_error(exc: SQLAlchemyError) -> bool:
+    # Postgres undefined_table: SQLSTATE 42P01
+    orig = getattr(exc, "orig", None)
+    if getattr(orig, "pgcode", None) == "42P01":
+        return True
+    message = str(orig or exc).lower()
+    return 'relation "idempotency_keys" does not exist' in message
 
 
 @dataclass
@@ -56,8 +66,11 @@ class IdempotencyService:
         path: str,
         payload: Any,
     ) -> tuple[IdempotencyContext | None, IdempotencyReplay | None]:
+        global _IDEMPOTENCY_DISABLED
         normalized_key = _normalize_key(key)
         if not normalized_key:
+            return None, None
+        if _IDEMPOTENCY_DISABLED:
             return None, None
 
         request_hash = _fingerprint(payload)
@@ -109,6 +122,13 @@ class IdempotencyService:
                 session.commit()
                 return IdempotencyContext(key=normalized_key, request_hash=request_hash), None
         except SQLAlchemyError as exc:
+            if _is_missing_table_error(exc):
+                _IDEMPOTENCY_DISABLED = True
+                logger.warning(
+                    "Idempotency disabled: missing table 'idempotency_keys'. "
+                    "Run migrations (alembic upgrade head)."
+                )
+                return None, None
             logger.warning(
                 "Idempotency store unavailable; continuing without idempotency key. key=%s method=%s path=%s",
                 normalized_key,
@@ -120,7 +140,10 @@ class IdempotencyService:
 
     @staticmethod
     def complete(context: IdempotencyContext | None, *, status_code: int, body: dict[str, Any]) -> None:
+        global _IDEMPOTENCY_DISABLED
         if context is None:
+            return
+        if _IDEMPOTENCY_DISABLED:
             return
         now = _now_utc()
         try:
@@ -133,7 +156,13 @@ class IdempotencyService:
                 row.completed_at = now
                 row.updated_at = now
                 session.commit()
-        except SQLAlchemyError:
+        except SQLAlchemyError as exc:
+            if _is_missing_table_error(exc):
+                _IDEMPOTENCY_DISABLED = True
+                logger.warning(
+                    "Idempotency disabled during completion: missing table 'idempotency_keys'."
+                )
+                return
             logger.warning(
                 "Idempotency completion failed; response will still be returned. key=%s",
                 context.key,
@@ -142,7 +171,10 @@ class IdempotencyService:
 
     @staticmethod
     def abandon(context: IdempotencyContext | None) -> None:
+        global _IDEMPOTENCY_DISABLED
         if context is None:
+            return
+        if _IDEMPOTENCY_DISABLED:
             return
         try:
             with SessionLocal() as session:
@@ -154,7 +186,13 @@ class IdempotencyService:
                     )
                 )
                 session.commit()
-        except SQLAlchemyError:
+        except SQLAlchemyError as exc:
+            if _is_missing_table_error(exc):
+                _IDEMPOTENCY_DISABLED = True
+                logger.warning(
+                    "Idempotency disabled during cleanup: missing table 'idempotency_keys'."
+                )
+                return
             logger.warning(
                 "Idempotency abandon failed; proceeding without cleanup. key=%s",
                 context.key,
