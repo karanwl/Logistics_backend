@@ -2694,6 +2694,17 @@ class DatabaseService:
                                 "expires_at": expires_dt,
                             },
                         )
+                        if "last_login_at" in users_cols:
+                            session.execute(
+                                text(
+                                    """
+                                    UPDATE users
+                                    SET last_login_at = NOW()
+                                    WHERE user_id = :user_id
+                                    """
+                                ),
+                                {"user_id": user_id},
+                            )
                     session.commit()
                     result = self.get_user_by_email(user_email) if user_email else None
                 elif "session_token" in users_cols:
@@ -2704,6 +2715,8 @@ class DatabaseService:
                     if "session_expires" in users_cols:
                         set_parts.append("session_expires = :expires")
                         params["expires"] = expires_dt
+                    if token and "last_login_at" in users_cols:
+                        set_parts.append("last_login_at = NOW()")
                     if "updated_at" in users_cols:
                         set_parts.append("updated_at = NOW()")
                     update_result = session.execute(
