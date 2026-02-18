@@ -23,9 +23,9 @@ from auth import (
 )
 from config import settings
 from push_notifications import register_push_token, unregister_push_token, send_push_notification, tokens_for_identities
-from responses import ok_response
+from responses import no_store, ok_response
 from services import DatabaseService
-from utils import business_date_iso, next_plan_date_iso, parse_iso_date
+from utils import business_date_iso, next_plan_date_iso, parse_iso_date, parse_photo_refs
 
 
 router = APIRouter(prefix="/api/driver", tags=["driver"])
@@ -138,39 +138,6 @@ def _status_field_value(fields: dict) -> str:
     return ""
 
 
-def _parse_photo_urls(value: object) -> list[str]:
-    if value is None:
-        return []
-
-    if isinstance(value, list):
-        out: list[str] = []
-        for item in value:
-            if isinstance(item, str):
-                txt = item.strip()
-                if txt:
-                    out.append(txt)
-                continue
-            if isinstance(item, dict):
-                txt = str(item.get("url") or item.get("href") or "").strip()
-                if txt:
-                    out.append(txt)
-        return out
-
-    if isinstance(value, str):
-        raw = value.strip()
-        if not raw:
-            return []
-        try:
-            parsed = json.loads(raw)
-        except Exception:
-            parsed = None
-        if isinstance(parsed, list):
-            return _parse_photo_urls(parsed)
-        return [raw]
-
-    return []
-
-
 def _delivery_photo_field_name() -> str:
     return str(settings.DELIVERIES_PHOTO_URLS_FIELD or "").strip() or "Photo URLs"
 
@@ -276,7 +243,7 @@ def _photo_ref_to_url(photo_ref: str) -> str:
 
 
 def _photo_urls_for_response(value: object) -> list[str]:
-    refs = _parse_photo_urls(value)
+    refs = parse_photo_refs(value)
     return [url for url in (_photo_ref_to_url(ref) for ref in refs) if url]
 
 
@@ -815,9 +782,7 @@ def driver_refresh_session(request: Request):
             "role": user.get("role"),
         },
     }
-    resp = ok_response(request, payload)
-    resp.headers["Cache-Control"] = "no-store"
-    return resp
+    return no_store(ok_response(request, payload))
 
 
 @router.post("/push/register")
@@ -837,7 +802,7 @@ def driver_push_register(payload: PushRegisterRequest, request: Request):
     for identity in identities:
         count = max(count, register_push_token(identity, token))
 
-    resp = ok_response(
+    return no_store(ok_response(
         request,
         {
             "ok": True,
@@ -845,9 +810,7 @@ def driver_push_register(payload: PushRegisterRequest, request: Request):
             "device_count": count,
             "platform": (payload.platform or "").strip().lower() or None,
         },
-    )
-    resp.headers["Cache-Control"] = "no-store"
-    return resp
+    ))
 
 
 @router.post("/push/unregister")
@@ -863,16 +826,14 @@ def driver_push_unregister(payload: PushUnregisterRequest, request: Request):
     for identity in identities:
         remaining = max(remaining, unregister_push_token(identity, payload.token))
 
-    resp = ok_response(
+    return no_store(ok_response(
         request,
         {
             "ok": True,
             "registered": remaining > 0,
             "device_count": remaining,
         },
-    )
-    resp.headers["Cache-Control"] = "no-store"
-    return resp
+    ))
 
 
 @router.post("/push/test")
@@ -886,16 +847,14 @@ def driver_push_test(payload: PushTestRequest, request: Request):
         body=(payload.body or "Test push from server").strip() or "Test push from server",
         data={"kind": "test"},
     )
-    resp = ok_response(
+    return no_store(ok_response(
         request,
         {
             "ok": bool(result.get("ok")),
             "tokens": len(tokens),
             "result": result,
         },
-    )
-    resp.headers["Cache-Control"] = "no-store"
-    return resp
+    ))
 
 
 @router.get("/route/today")
@@ -918,7 +877,7 @@ def driver_route_today(request: Request, include_all: bool = False):
     )
     deliveries = _overlay_live_delivery_progress(deliveries, svc)
 
-    resp = ok_response(
+    return no_store(ok_response(
         request,
         {
             "published": True,
@@ -929,9 +888,7 @@ def driver_route_today(request: Request, include_all: bool = False):
             "meta": plan.get("meta") or {},
             "source": plan.get("source") or "published_plans",
         },
-    )
-    resp.headers["Cache-Control"] = "no-store"
-    return resp
+    ))
 
 
 @router.get("/route/{plan_date}")
@@ -954,7 +911,7 @@ def driver_route_date(plan_date: str, request: Request, include_all: bool = Fals
     )
     deliveries = _overlay_live_delivery_progress(deliveries, svc)
 
-    resp = ok_response(
+    return no_store(ok_response(
         request,
         {
             "published": True,
@@ -965,9 +922,7 @@ def driver_route_date(plan_date: str, request: Request, include_all: bool = Fals
             "meta": plan.get("meta") or {},
             "source": plan.get("source") or "published_plans",
         },
-    )
-    resp.headers["Cache-Control"] = "no-store"
-    return resp
+    ))
 
 
 @router.get("/route/changes")
@@ -986,7 +941,7 @@ def driver_route_changes(request: Request, since: str | None = None, date: str |
     if updated_dt and since_dt:
         changed = updated_dt > since_dt
 
-    resp = ok_response(
+    return no_store(ok_response(
         request,
         {
             "published": True,
@@ -994,9 +949,7 @@ def driver_route_changes(request: Request, since: str | None = None, date: str |
             "plan_date": plan.get("plan_date"),
             "updated_at": updated_at,
         },
-    )
-    resp.headers["Cache-Control"] = "no-store"
-    return resp
+    ))
 
 
 @router.get("/route-checks")
@@ -1072,9 +1025,7 @@ def driver_delivery_detail(delivery_id: str, request: Request):
         status_updated_at=str(fields.get(settings.DELIVERIES_STATUS_UPDATED_FIELD) or "").strip() or None,
     )
 
-    resp = ok_response(request, payload.model_dump())
-    resp.headers["Cache-Control"] = "no-store"
-    return resp
+    return no_store(ok_response(request, payload.model_dump()))
 
 
 @router.post("/deliveries/{delivery_id}/status")
@@ -1111,7 +1062,7 @@ def update_delivery_status(delivery_id: str, payload: DriverStatusUpdate, reques
     svc = DatabaseService()
     if photo_urls:
         current = svc.get_delivery_by_business_id(delivery_id)
-        existing = _parse_photo_urls((current or {}).get("fields", {}).get(_delivery_photo_field_name()))
+        existing = parse_photo_refs((current or {}).get("fields", {}).get(_delivery_photo_field_name()))
         merged = _dedupe_photo_refs(existing + photo_urls)
         if merged:
             fields[_delivery_photo_field_name()] = json.dumps(merged, separators=(",", ":"))
@@ -1136,9 +1087,7 @@ def update_delivery_status(delivery_id: str, payload: DriverStatusUpdate, reques
     if not updated:
         raise HTTPException(status_code=404, detail="Delivery not found.")
 
-    resp = ok_response(request, {"ok": True, "delivery_id": delivery_id, "updated_fields": list(fields.keys())})
-    resp.headers["Cache-Control"] = "no-store"
-    return resp
+    return no_store(ok_response(request, {"ok": True, "delivery_id": delivery_id, "updated_fields": list(fields.keys())}))
 
 
 @router.post("/uploads/photo")
@@ -1173,7 +1122,7 @@ async def upload_photo(
     if not current:
         raise HTTPException(status_code=404, detail="Delivery not found.")
 
-    existing = _parse_photo_urls((current or {}).get("fields", {}).get(_delivery_photo_field_name()))
+    existing = parse_photo_refs((current or {}).get("fields", {}).get(_delivery_photo_field_name()))
     merged = _dedupe_photo_refs(existing + [photo_ref])
     updated = svc.update_delivery_by_business_id(
         delivery_id,
@@ -1182,7 +1131,7 @@ async def upload_photo(
     if not updated:
         raise HTTPException(status_code=404, detail="Delivery not found.")
 
-    resp = ok_response(
+    return no_store(ok_response(
         request,
         {
             "ok": True,
@@ -1193,6 +1142,4 @@ async def upload_photo(
             "bytes": len(optimized),
             "original_bytes": raw_size,
         },
-    )
-    resp.headers["Cache-Control"] = "no-store"
-    return resp
+    ))

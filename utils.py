@@ -1,3 +1,4 @@
+import json
 import logging
 import re
 from datetime import date, datetime, timedelta
@@ -5,7 +6,42 @@ from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from config import settings
-from services import DatabaseService
+
+
+def _database_service_cls():
+    from services import DatabaseService
+
+    return DatabaseService
+
+
+def parse_photo_refs(value: object) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        out: list[str] = []
+        for item in value:
+            if isinstance(item, str):
+                candidate = item.strip()
+                if candidate:
+                    out.append(candidate)
+                continue
+            if isinstance(item, dict):
+                candidate = str(item.get("url") or item.get("href") or "").strip()
+                if candidate:
+                    out.append(candidate)
+        return out
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return []
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            parsed = None
+        if isinstance(parsed, list):
+            return parse_photo_refs(parsed)
+        return [raw]
+    return []
 
 
 def parse_sales_order(value: str | None):
@@ -33,17 +69,18 @@ def business_date_iso(offset_days: int = 0) -> str:
 
 
 def next_plan_date_iso(logger: logging.Logger | None = None) -> str:
+    database_service_cls = _database_service_cls()
     strategy = (settings.NEXT_DELIVERY_STRATEGY or "business_day").strip().lower()
     if strategy == "next_scheduled":
         try:
-            return DatabaseService().get_next_delivery_date()
+            return database_service_cls().get_next_delivery_date()
         except Exception:
             if logger:
                 logger.warning(
                     "Falling back to next_business_date_iso after get_next_delivery_date failure.",
                     exc_info=True,
                 )
-    return DatabaseService.next_business_date_iso()
+    return database_service_cls.next_business_date_iso()
 
 
 def parse_iso_date(

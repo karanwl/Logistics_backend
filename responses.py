@@ -32,3 +32,8 @@ def ok_response(
     else:
         body = payload
     return JSONResponse(body, status_code=status_code, headers=headers)
+
+
+def no_store(response: JSONResponse) -> JSONResponse:
+    response.headers["Cache-Control"] = "no-store"
+    return response

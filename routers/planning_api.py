@@ -28,7 +28,7 @@ from security import csrf_protect
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 from responses import ok_response
-from utils import business_date_iso, next_plan_date_iso, parse_sales_order, parse_iso_date, to_int
+from utils import business_date_iso, next_plan_date_iso, parse_iso_date, parse_photo_refs, parse_sales_order, to_int
 
 router = APIRouter(dependencies=[Depends(csrf_protect)])
 logger = logging.getLogger(__name__)
@@ -56,36 +56,6 @@ def _require_manager_admin(request: Request):
 
 def _delivery_photo_field_name() -> str:
     return str(settings.DELIVERIES_PHOTO_URLS_FIELD or "").strip() or "Photo URLs"
-
-
-def _parse_photo_urls(value: object) -> list[str]:
-    if value is None:
-        return []
-    if isinstance(value, list):
-        out: list[str] = []
-        for item in value:
-            if isinstance(item, str):
-                candidate = item.strip()
-                if candidate:
-                    out.append(candidate)
-                continue
-            if isinstance(item, dict):
-                candidate = str(item.get("url") or item.get("href") or "").strip()
-                if candidate:
-                    out.append(candidate)
-        return out
-    if isinstance(value, str):
-        raw = value.strip()
-        if not raw:
-            return []
-        try:
-            parsed = json.loads(raw)
-        except Exception:
-            parsed = None
-        if isinstance(parsed, list):
-            return _parse_photo_urls(parsed)
-        return [raw]
-    return []
 
 
 @router.get("/me")
@@ -242,9 +212,7 @@ class BulkUpdateDeliveriesRequest(BaseModel):
 
 @router.get("/drivers/list")
 def drivers_list(request: Request):
-    user = get_current_user(request)
-    if not user or user.get("role") not in ("manager", "admin"):
-        raise HTTPException(status_code=403, detail="Manager/Admin access required.")
+    _require_manager_admin(request)
     svc = DatabaseService()
     records = svc.list_users_min(role=settings.DRIVERS_ROLE_VALUE, active_only=False, force_refresh=_wants_refresh(request))
     drivers = [d.get("display_name") or d.get("name") for d in records if d.get("display_name") or d.get("name")]
@@ -255,9 +223,7 @@ def drivers_list(request: Request):
 
 @router.get("/drivers/list-full")
 def drivers_list_full(request: Request):
-    user = get_current_user(request)
-    if not user or user.get("role") not in ("manager", "admin"):
-        raise HTTPException(status_code=403, detail="Manager/Admin access required.")
+    _require_manager_admin(request)
     svc = DatabaseService()
     records = svc.list_users_min(role=settings.DRIVERS_ROLE_VALUE, active_only=False, force_refresh=_wants_refresh(request))
     drivers = []
@@ -290,9 +256,7 @@ def deliveries_all(request: Request):
 
 @router.get("/live/today")
 def live_today(request: Request, date: str | None = None):
-    user = get_current_user(request)
-    if not user or user.get("role") not in ("manager", "admin"):
-        raise HTTPException(status_code=403, detail="Manager/Admin access required.")
+    _require_manager_admin(request)
     live_date = _require_iso_date_param(date, "date") if date else _business_date(offset_days=0)
     svc = DatabaseService()
     payload = svc.get_live_progress_snapshot(live_date=live_date, force_refresh=_wants_refresh(request))
@@ -303,9 +267,7 @@ def live_today(request: Request, date: str | None = None):
 
 @router.post("/plan/tomorrow")
 def plan_tomorrow(fleet: FleetRequest, request: Request):
-    user = get_current_user(request)
-    if not user or user.get("role") not in ("manager", "admin"):
-        raise HTTPException(status_code=403, detail="Manager/Admin access required.")
+    _require_manager_admin(request)
     force_refresh = _wants_refresh(request)
     resp = ok_response(
         request,
@@ -317,9 +279,7 @@ def plan_tomorrow(fleet: FleetRequest, request: Request):
 
 @router.post("/plan/recalculate")
 def plan_recalculate(payload: list[RecalculateRoute], request: Request):
-    user = get_current_user(request)
-    if not user or user.get("role") not in ("manager", "admin"):
-        raise HTTPException(status_code=403, detail="Manager/Admin access required.")
+    _require_manager_admin(request)
     routes = [r.model_dump() for r in payload]
     force_refresh = _wants_refresh(request)
     resp = ok_response(request, recalculate_tomorrow_plan(routes, force_refresh=force_refresh))
@@ -1572,7 +1532,7 @@ def delivery_get(delivery_id: str, request: Request):
         "window_end": fields.get("Window End") or "",
         "status": fields.get(settings.DELIVERIES_STATUS_FIELD) or "",
         "driver_notes": fields.get(settings.DELIVERIES_DRIVER_NOTES_FIELD) or "",
-        "photo_urls": _parse_photo_urls(fields.get(_delivery_photo_field_name())),
+        "photo_urls": parse_photo_refs(fields.get(_delivery_photo_field_name())),
     }
     resp = ok_response(request, {"delivery": payload, "jobsites": jobsites})
     resp.headers["Cache-Control"] = "no-store"

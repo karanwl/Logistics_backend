@@ -21,6 +21,7 @@ from config import settings
 from db import SessionLocal, engine
 from db_models import Delivery, Jobsite, PublishedPlan, User
 from models import DeliveryJob
+from utils import parse_photo_refs
 
 logger = logging.getLogger(__name__)
 _CACHE_LOCK = threading.Lock()
@@ -320,33 +321,7 @@ class DatabaseService:
 
     @staticmethod
     def _normalize_photo_refs(value: Any) -> list[str]:
-        if value is None:
-            return []
-        if isinstance(value, list):
-            out: list[str] = []
-            for item in value:
-                if isinstance(item, str):
-                    candidate = item.strip()
-                    if candidate:
-                        out.append(candidate)
-                    continue
-                if isinstance(item, dict):
-                    candidate = str(item.get("url") or item.get("href") or "").strip()
-                    if candidate:
-                        out.append(candidate)
-            return out
-        if isinstance(value, str):
-            raw = value.strip()
-            if not raw:
-                return []
-            try:
-                parsed = json.loads(raw)
-            except Exception:
-                parsed = None
-            if isinstance(parsed, list):
-                return DatabaseService._normalize_photo_refs(parsed)
-            return [raw]
-        return []
+        return parse_photo_refs(value)
 
     def _jobsite_record(self, jobsite: Jobsite) -> Dict[str, Any]:
         fields = {
@@ -1146,6 +1121,61 @@ class DatabaseService:
         target = self._resolve_target_date()
         return target.isoformat()
 
+    @staticmethod
+    def _set_attr_if_changed(record: Any, attr: str, value: Any) -> bool:
+        current = getattr(record, attr, None)
+        if current == value:
+            return False
+        setattr(record, attr, value)
+        return True
+
+    def _normalize_bulk_delivery_update(
+        self,
+        item: Dict[str, Any],
+    ) -> tuple[dict[str, Any], bool, str | None]:
+        normalized: dict[str, Any] = {}
+        has_supported_field = False
+
+        if "scheduled_date" in item:
+            has_supported_field = True
+            raw_date = item.get("scheduled_date")
+            normalized_date = self._coerce_date(raw_date)
+            if raw_date not in (None, "") and normalized_date is None:
+                return {}, True, "scheduled_date must be in YYYY-MM-DD format."
+            normalized["scheduled_date"] = normalized_date
+
+        field_specs: tuple[tuple[str, str, Any], ...] = (
+            ("med_skid", "med_skid", self._coerce_int),
+            ("ps_delivered", "ps_delivered", self._to_bool),
+            ("skid", "med_skid", self._coerce_int),
+            ("small_skid", "small_skid", self._coerce_int),
+            ("large_skid", "large_skid", self._coerce_int),
+            ("pickup", "pickup", self._to_bool),
+            ("pickup_vehicle", "pickup_vehicle", self._normalize_pickup_vehicle),
+            ("requires_empty_truck", "requires_empty_truck", self._to_bool),
+            ("door", "door", self._coerce_int),
+            ("frame", "frame", self._coerce_int),
+            ("exp_frame", "exp_frame", self._coerce_int),
+            ("box", "box", self._coerce_int),
+            (
+                "window_start",
+                "window_start",
+                lambda value: self._first_str(value) if value not in (None, "") else None,
+            ),
+            (
+                "window_end",
+                "window_end",
+                lambda value: self._first_str(value) if value not in (None, "") else None,
+            ),
+        )
+        for source_field, target_attr, converter in field_specs:
+            if source_field not in item:
+                continue
+            has_supported_field = True
+            normalized[target_attr] = converter(item.get(source_field))
+
+        return normalized, has_supported_field, None
+
     def bulk_update_deliveries_by_business_id(self, updates: list[Dict[str, Any]]) -> Dict[str, Any]:
         updated_ids: list[str] = []
         unchanged_ids: list[str] = []
@@ -1162,80 +1192,10 @@ class DatabaseService:
                     errors.append({"delivery_id": delivery_id_raw, "error": "Delivery not found."})
                     continue
 
-                has_supported_field = False
-                changed = False
-
-                def _set_if_changed(attr: str, value: Any):
-                    nonlocal changed
-                    current = getattr(delivery, attr, None)
-                    if current != value:
-                        setattr(delivery, attr, value)
-                        changed = True
-
-                if "scheduled_date" in item:
-                    has_supported_field = True
-                    raw_date = item.get("scheduled_date")
-                    normalized_date = self._coerce_date(raw_date)
-                    if raw_date not in (None, "") and normalized_date is None:
-                        errors.append(
-                            {
-                                "delivery_id": delivery_id_raw,
-                                "error": "scheduled_date must be in YYYY-MM-DD format.",
-                            }
-                        )
-                        continue
-                    _set_if_changed("scheduled_date", normalized_date)
-
-                if "med_skid" in item:
-                    has_supported_field = True
-                    _set_if_changed("med_skid", self._coerce_int(item.get("med_skid")))
-                if "ps_delivered" in item:
-                    has_supported_field = True
-                    _set_if_changed("ps_delivered", self._to_bool(item.get("ps_delivered")))
-                if "skid" in item:
-                    has_supported_field = True
-                    _set_if_changed("med_skid", self._coerce_int(item.get("skid")))
-                if "small_skid" in item:
-                    has_supported_field = True
-                    _set_if_changed("small_skid", self._coerce_int(item.get("small_skid")))
-                if "large_skid" in item:
-                    has_supported_field = True
-                    _set_if_changed("large_skid", self._coerce_int(item.get("large_skid")))
-                if "pickup" in item:
-                    has_supported_field = True
-                    _set_if_changed("pickup", self._to_bool(item.get("pickup")))
-                if "pickup_vehicle" in item:
-                    has_supported_field = True
-                    _set_if_changed("pickup_vehicle", self._normalize_pickup_vehicle(item.get("pickup_vehicle")))
-                if "requires_empty_truck" in item:
-                    has_supported_field = True
-                    _set_if_changed("requires_empty_truck", self._to_bool(item.get("requires_empty_truck")))
-                if "door" in item:
-                    has_supported_field = True
-                    _set_if_changed("door", self._coerce_int(item.get("door")))
-                if "frame" in item:
-                    has_supported_field = True
-                    _set_if_changed("frame", self._coerce_int(item.get("frame")))
-                if "exp_frame" in item:
-                    has_supported_field = True
-                    _set_if_changed("exp_frame", self._coerce_int(item.get("exp_frame")))
-                if "box" in item:
-                    has_supported_field = True
-                    _set_if_changed("box", self._coerce_int(item.get("box")))
-                if "window_start" in item:
-                    has_supported_field = True
-                    value = item.get("window_start")
-                    _set_if_changed(
-                        "window_start",
-                        self._first_str(value) if value not in (None, "") else None,
-                    )
-                if "window_end" in item:
-                    has_supported_field = True
-                    value = item.get("window_end")
-                    _set_if_changed(
-                        "window_end",
-                        self._first_str(value) if value not in (None, "") else None,
-                    )
+                parsed_updates, has_supported_field, validation_error = self._normalize_bulk_delivery_update(item)
+                if validation_error:
+                    errors.append({"delivery_id": delivery_id_raw, "error": validation_error})
+                    continue
 
                 if not has_supported_field:
                     errors.append(
@@ -1245,6 +1205,11 @@ class DatabaseService:
                         }
                     )
                     continue
+
+                changed = False
+                for attr, value in parsed_updates.items():
+                    if self._set_attr_if_changed(delivery, attr, value):
+                        changed = True
 
                 pickup_vehicle = self._normalize_pickup_vehicle(getattr(delivery, "pickup_vehicle", None))
                 pickup_flag = bool(getattr(delivery, "pickup", False))

@@ -2,7 +2,7 @@ import logging
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 
-from auth import clear_session, get_current_user, hash_password, issue_session, verify_password, maybe_upgrade_password
+from auth import clear_session, get_current_user, issue_session, maybe_upgrade_password, verify_password
 from config import settings
 from security import csrf_protect
 from responses import ok_response
