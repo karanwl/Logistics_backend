@@ -947,10 +947,15 @@ class RouteOptimizer:
 
         TRUCK_SERVICE_TIME = int(self.costs["truck_service_time_s"])
         VAN_SERVICE_TIME = int(self.costs["van_service_time_s"])
+        van_eligible = [False] * len(self.distance_matrix)
+        for node in range(1, len(self.distance_matrix)):
+            van_eligible[node] = not self._node_requires_truck(node)
 
         def svc_for(v_type: str, node: int) -> int:
             if node == self.depot:
                 return 0
+            if v_type == "truck" and van_eligible[node]:
+                return VAN_SERVICE_TIME
             return TRUCK_SERVICE_TIME if v_type == "truck" else VAN_SERVICE_TIME
 
         def fmt_hhmm(seconds: int) -> str:
