@@ -125,6 +125,8 @@ class Settings(BaseModel):
     HTTP_TIMEOUT_SECONDS: int = _env_int("HTTP_TIMEOUT_SECONDS", "30")
     HTTP_RETRIES: int = _env_int("HTTP_RETRIES", "3")
     HTTP_RETRY_BACKOFF: float = _env_float("HTTP_RETRY_BACKOFF", "0.5")
+    IDEMPOTENCY_TTL_SECONDS: int = _env_int("IDEMPOTENCY_TTL_SECONDS", "86400")
+    PUSH_TOKEN_TTL_DAYS: int = _env_int("PUSH_TOKEN_TTL_DAYS", "120")
     FCM_SERVER_KEY: str = os.getenv("FCM_SERVER_KEY", "")
     FCM_SEND_URL: str = os.getenv("FCM_SEND_URL", "https://fcm.googleapis.com/fcm/send")
 

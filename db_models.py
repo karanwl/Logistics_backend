@@ -111,3 +111,29 @@ class PublishedPlan(Base):
     updated_at = Column("updated_at", DateTime(timezone=True))
 
     publisher = relationship("User", back_populates="published_plans")
+
+
+class PushToken(Base):
+    __tablename__ = "push_tokens"
+
+    identity = Column("identity", Text, primary_key=True)
+    token = Column("token", Text, primary_key=True)
+    created_at = Column("created_at", DateTime(timezone=True))
+    updated_at = Column("updated_at", DateTime(timezone=True))
+    last_seen_at = Column("last_seen_at", DateTime(timezone=True))
+    expires_at = Column("expires_at", DateTime(timezone=True))
+
+
+class IdempotencyKey(Base):
+    __tablename__ = "idempotency_keys"
+
+    idempotency_key = Column("idempotency_key", Text, primary_key=True)
+    request_method = Column("request_method", Text, nullable=False)
+    request_path = Column("request_path", Text, nullable=False)
+    request_hash = Column("request_hash", Text, nullable=False)
+    status_code = Column("status_code", Integer)
+    response_body = Column("response_body", Text)
+    created_at = Column("created_at", DateTime(timezone=True))
+    updated_at = Column("updated_at", DateTime(timezone=True))
+    expires_at = Column("expires_at", DateTime(timezone=True))
+    completed_at = Column("completed_at", DateTime(timezone=True))

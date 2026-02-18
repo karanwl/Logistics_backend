@@ -14,6 +14,7 @@ import uuid
 import threading
 
 from auth import get_current_user, hash_password
+from idempotency import IdempotencyService
 from planning import (
     debug_tomorrow_matrix,
     generate_tomorrow_plan,
@@ -45,6 +46,34 @@ def _wants_refresh(request: Request) -> bool:
     cache_control = (request.headers.get("cache-control") or "").lower()
     pragma = (request.headers.get("pragma") or "").lower()
     return "no-cache" in cache_control or "max-age=0" in cache_control or "no-cache" in pragma
+
+
+def _idempotency_key(request: Request) -> str:
+    return (request.headers.get("x-idempotency-key") or request.headers.get("idempotency-key") or "").strip()
+
+
+def _begin_idempotent_request(
+    request: Request,
+    *,
+    path: str,
+    payload: Any,
+):
+    key = _idempotency_key(request)
+    if not key:
+        return None, None
+    return IdempotencyService.begin(
+        key=key,
+        method=request.method.upper(),
+        path=path,
+        payload=payload,
+    )
+
+
+def _idempotent_replay_response(request: Request, replay) -> Any:
+    resp = ok_response(request, replay.body, status_code=replay.status_code)
+    resp.headers["X-Idempotency-Replayed"] = "true"
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
 
 
 def _require_manager_admin(request: Request):
@@ -1185,6 +1214,21 @@ def plan_publish(payload: PublishPlanRequest, request: Request):
         driver_profiles=payload.driver_profiles or [],
         svc=svc,
     )
+    idem_context, replay = _begin_idempotent_request(
+        request,
+        path="/plan/publish",
+        payload={
+            "plan_date": plan_date,
+            "routes": normalized_routes,
+            "deliveries": payload.deliveries or [],
+            "meta": payload.meta or {},
+            "fleet": payload.fleet or {},
+            "driver_profiles": normalized_driver_profiles,
+            "action": "publish",
+        },
+    )
+    if replay:
+        return _idempotent_replay_response(request, replay)
 
     def _set_field(out, field_name, value):
         if not field_name:
@@ -1203,59 +1247,62 @@ def plan_publish(payload: PublishPlanRequest, request: Request):
     _set_field(fields, settings.PUBLISHED_PLANS_PUBLISHED_BY_FIELD, user.get("email") or user.get("name") or "manager/admin")
     _set_field(fields, settings.PUBLISHED_PLANS_TYPE_FIELD, "published")
 
-    assignment_result = svc.apply_route_assignments(plan_date, normalized_routes)
-
-    record = {"id": str(plan_date)}
-    stored = False
-    storage_error = None
     try:
-        record = svc.upsert_published_plan(plan_date, fields, plan_type="published")
-        stored = True
-    except ValueError:
-        stored = False
-    except requests.HTTPError as e:
-        stored = False
-        if e.response is not None:
-            try:
-                storage_error = e.response.json()
-            except ValueError:
-                storage_error = e.response.text
-        else:
-            storage_error = str(e)
+        assignment_result = svc.apply_route_assignments(plan_date, normalized_routes)
 
-    try:
-        identities = _driver_identities_from_routes(normalized_routes)
-        tokens = tokens_for_identities(identities)
-        send_push_notification(
-            tokens=tokens,
-            title="Route Updated",
-            body=(
-                f"Your route for {plan_date} has been updated."
-                if is_update
-                else f"Your route for {plan_date} has been published."
-            ),
-            data={
-                "kind": "route_update",
-                "plan_date": plan_date,
-                "action": "updated" if is_update else "published",
-            },
-        )
-    except Exception:
-        logger.warning("Route publish push notification failed", exc_info=True)
+        record = {"id": str(plan_date)}
+        stored = False
+        storage_error = None
+        try:
+            record = svc.upsert_published_plan(plan_date, fields, plan_type="published")
+            stored = True
+        except ValueError:
+            stored = False
+        except requests.HTTPError as e:
+            stored = False
+            if e.response is not None:
+                try:
+                    storage_error = e.response.json()
+                except ValueError:
+                    storage_error = e.response.text
+            else:
+                storage_error = str(e)
 
-    resp = ok_response(
-        request,
-        {
+        try:
+            identities = _driver_identities_from_routes(normalized_routes)
+            tokens = tokens_for_identities(identities)
+            send_push_notification(
+                tokens=tokens,
+                title="Route Updated",
+                body=(
+                    f"Your route for {plan_date} has been updated."
+                    if is_update
+                    else f"Your route for {plan_date} has been published."
+                ),
+                data={
+                    "kind": "route_update",
+                    "plan_date": plan_date,
+                    "action": "updated" if is_update else "published",
+                },
+            )
+        except Exception:
+            logger.warning("Route publish push notification failed", exc_info=True)
+
+        response_body = {
             "ok": True,
             "plan_date": plan_date,
             "record_id": record.get("id"),
             "stored_plan_blob": stored,
             "assignments": assignment_result,
             "storage_error": storage_error,
-        },
-    )
-    resp.headers["Cache-Control"] = "no-store"
-    return resp
+        }
+        IdempotencyService.complete(idem_context, status_code=200, body=response_body)
+        resp = ok_response(request, response_body)
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
+    except Exception:
+        IdempotencyService.abandon(idem_context)
+        raise
 
 
 @router.post("/plan/manual/save")
@@ -1279,6 +1326,22 @@ def plan_manual_save(payload: PublishPlanRequest, request: Request):
         driver_profiles=payload.driver_profiles or [],
         svc=svc,
     )
+    idem_context, replay = _begin_idempotent_request(
+        request,
+        path="/plan/manual/save",
+        payload={
+            "plan_date": plan_date,
+            "routes": normalized_routes,
+            "deliveries": normalized_deliveries,
+            "meta": payload.meta or {},
+            "fleet": payload.fleet or {},
+            "driver_profiles": normalized_driver_profiles,
+            "action": "manual_save",
+        },
+    )
+    if replay:
+        return _idempotent_replay_response(request, replay)
+
     normalized_routes = _normalize_manual_routes_shape(normalized_routes)
     summary = _route_metrics_summary(normalized_routes)
     missing_coordinates = _missing_delivery_coordinate_ids(normalized_deliveries)
@@ -1296,24 +1359,23 @@ def plan_manual_save(payload: PublishPlanRequest, request: Request):
     else:
         meta_payload.pop("missing_delivery_coordinates", None)
 
-    saved = svc.upsert_plan_payload(
-        plan_date=plan_date,
-        plan_type="manual",
-        fields={
-            "routes": normalized_routes,
-            "deliveries": normalized_deliveries,
-            "meta": meta_payload,
-            "fleet": meta_payload.get("fleet") or payload.fleet or {},
-            "driver_profiles": normalized_driver_profiles,
-            "status": "manual",
-            "updated_at": datetime.now(ZoneInfo("UTC")).isoformat(),
-            "updated_by": user.get("email") or user.get("name") or "manager/admin",
-        },
-    )
+    try:
+        saved = svc.upsert_plan_payload(
+            plan_date=plan_date,
+            plan_type="manual",
+            fields={
+                "routes": normalized_routes,
+                "deliveries": normalized_deliveries,
+                "meta": meta_payload,
+                "fleet": meta_payload.get("fleet") or payload.fleet or {},
+                "driver_profiles": normalized_driver_profiles,
+                "status": "manual",
+                "updated_at": datetime.now(ZoneInfo("UTC")).isoformat(),
+                "updated_by": user.get("email") or user.get("name") or "manager/admin",
+            },
+        )
 
-    resp = ok_response(
-        request,
-        {
+        response_body = {
             "ok": True,
             "plan_date": plan_date,
             "plan_type": "manual",
@@ -1322,10 +1384,14 @@ def plan_manual_save(payload: PublishPlanRequest, request: Request):
             "summary": summary,
             "missing_delivery_coordinates": missing_coordinates,
             "routes": normalized_routes,
-        },
-    )
-    resp.headers["Cache-Control"] = "no-store"
-    return resp
+        }
+        IdempotencyService.complete(idem_context, status_code=200, body=response_body)
+        resp = ok_response(request, response_body)
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
+    except Exception:
+        IdempotencyService.abandon(idem_context)
+        raise
 
 
 @router.get("/jobsites/list")
@@ -2151,88 +2217,105 @@ def deliveries_bulk_create(payload: BulkCreateDeliveriesRequest, request: Reques
     if not user or user.get("role") not in ("manager", "admin"):
         raise HTTPException(status_code=403, detail="Manager/Admin access required.")
 
+    idem_context, replay = _begin_idempotent_request(
+        request,
+        path="/deliveries/bulk-create",
+        payload={
+            "deliveries": [item.model_dump(exclude_none=True) for item in (payload.deliveries or [])],
+            "action": "bulk_create_deliveries",
+        },
+    )
+    if replay:
+        return _idempotent_replay_response(request, replay)
+
     svc = DatabaseService()
-    known_jobsites: dict[str, bool] = {}
-    results = []
-    for idx, item in enumerate(payload.deliveries or []):
-        errors = []
-        jobsite_id = (item.jobsite_id or "").strip()
-        scheduled_date = (item.scheduled_date or "").strip()
-        sales_order = (item.sales_order or "").strip()
+    try:
+        known_jobsites: dict[str, bool] = {}
+        results = []
+        for idx, item in enumerate(payload.deliveries or []):
+            errors = []
+            jobsite_id = (item.jobsite_id or "").strip()
+            scheduled_date = (item.scheduled_date or "").strip()
+            sales_order = (item.sales_order or "").strip()
 
-        if not jobsite_id:
-            errors.append("Missing jobsite_id.")
-        if not scheduled_date:
-            errors.append("Missing scheduled_date.")
-        if not sales_order:
-            errors.append("Missing sales_order.")
+            if not jobsite_id:
+                errors.append("Missing jobsite_id.")
+            if not scheduled_date:
+                errors.append("Missing scheduled_date.")
+            if not sales_order:
+                errors.append("Missing sales_order.")
 
-        if jobsite_id:
-            exists = known_jobsites.get(jobsite_id)
-            if exists is None:
-                try:
-                    svc.get_record("Jobsites", jobsite_id)
-                    exists = True
-                except Exception:
-                    exists = False
-                known_jobsites[jobsite_id] = exists
-            if not exists:
-                errors.append("Jobsite not found. Select a jobsite that already exists.")
+            if jobsite_id:
+                exists = known_jobsites.get(jobsite_id)
+                if exists is None:
+                    try:
+                        svc.get_record("Jobsites", jobsite_id)
+                        exists = True
+                    except Exception:
+                        exists = False
+                    known_jobsites[jobsite_id] = exists
+                if not exists:
+                    errors.append("Jobsite not found. Select a jobsite that already exists.")
 
-        if errors:
-            results.append({"ok": False, "index": idx, "error": " ".join(errors)})
-            continue
+            if errors:
+                results.append({"ok": False, "index": idx, "error": " ".join(errors)})
+                continue
 
-        pickup_vehicle = DatabaseService._normalize_pickup_vehicle(item.pickup_vehicle)
-        if bool(item.pickup) and not pickup_vehicle:
-            pickup_vehicle = "both"
-        if not bool(item.pickup):
-            pickup_vehicle = ""
+            pickup_vehicle = DatabaseService._normalize_pickup_vehicle(item.pickup_vehicle)
+            if bool(item.pickup) and not pickup_vehicle:
+                pickup_vehicle = "both"
+            if not bool(item.pickup):
+                pickup_vehicle = ""
 
-        fields = {
-            settings.DELIVERIES_JOB_LINK_FIELD: [jobsite_id],
-            "Scheduled Date": scheduled_date,
-            "Med Skid": int(item.med_skid or 0),
-            "Large Skid": int(item.large_skid or 0),
-            "Small Skid": int(item.small_skid or 0),
-            "Frame": int(item.frame or 0),
-            "Exp Frame": int(item.exp_frame or 0),
-            "Door": int(item.door or 0),
-            "Box": int(item.box or 0),
-            "Pickup": bool(item.pickup),
-            settings.DELIVERIES_PICKUP_VEHICLE_FIELD: pickup_vehicle or None,
-            "Requires Empty Truck": bool(item.requires_empty_truck),
-            "Window Start": (item.window_start or "").strip() or None,
-            "Window End": (item.window_end or "").strip() or None,
-        }
-        sales_order_value = parse_sales_order(sales_order)
-        if sales_order_value is not None:
-            fields[settings.DELIVERIES_SALES_ORDER_FIELD] = sales_order_value
+            fields = {
+                settings.DELIVERIES_JOB_LINK_FIELD: [jobsite_id],
+                "Scheduled Date": scheduled_date,
+                "Med Skid": int(item.med_skid or 0),
+                "Large Skid": int(item.large_skid or 0),
+                "Small Skid": int(item.small_skid or 0),
+                "Frame": int(item.frame or 0),
+                "Exp Frame": int(item.exp_frame or 0),
+                "Door": int(item.door or 0),
+                "Box": int(item.box or 0),
+                "Pickup": bool(item.pickup),
+                settings.DELIVERIES_PICKUP_VEHICLE_FIELD: pickup_vehicle or None,
+                "Requires Empty Truck": bool(item.requires_empty_truck),
+                "Window Start": (item.window_start or "").strip() or None,
+                "Window End": (item.window_end or "").strip() or None,
+            }
+            sales_order_value = parse_sales_order(sales_order)
+            if sales_order_value is not None:
+                fields[settings.DELIVERIES_SALES_ORDER_FIELD] = sales_order_value
 
-        try:
-            created = svc.create_record("Deliveries", fields)
-        except requests.HTTPError as e:
-            detail = None
-            if e.response is not None:
-                try:
-                    detail = e.response.json()
-                except Exception:
-                    detail = e.response.text
-            results.append(
-                {
-                    "ok": False,
-                    "index": idx,
-                    "error": "Airtable error while creating delivery.",
-                    "detail": detail or str(e),
-                }
-            )
-            continue
-        results.append({"ok": True, "index": idx, "record_id": created.get("id")})
+            try:
+                created = svc.create_record("Deliveries", fields)
+            except requests.HTTPError as e:
+                detail = None
+                if e.response is not None:
+                    try:
+                        detail = e.response.json()
+                    except Exception:
+                        detail = e.response.text
+                results.append(
+                    {
+                        "ok": False,
+                        "index": idx,
+                        "error": "Airtable error while creating delivery.",
+                        "detail": detail or str(e),
+                    }
+                )
+                continue
+            results.append({"ok": True, "index": idx, "record_id": created.get("id")})
 
-    ok_count = sum(1 for r in results if r.get("ok"))
-    resp = ok_response(request, {"ok": ok_count == len(results), "count": ok_count, "results": results})
-    resp.headers["Cache-Control"] = "no-store"
-    return resp
+        ok_count = sum(1 for r in results if r.get("ok"))
+        response_body = {"ok": ok_count == len(results), "count": ok_count, "results": results}
+        IdempotencyService.complete(idem_context, status_code=200, body=response_body)
+        resp = ok_response(request, response_body)
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
+    except Exception:
+        IdempotencyService.abandon(idem_context)
+        raise
 
 
 @router.post("/deliveries/bulk-update")
@@ -2245,14 +2328,31 @@ def deliveries_bulk_update(payload: BulkUpdateDeliveriesRequest, request: Reques
     if not items:
         raise HTTPException(status_code=400, detail="No deliveries provided.")
 
-    svc = DatabaseService()
-    result = svc.bulk_update_deliveries_by_business_id(
-        [item.model_dump(exclude_none=True) for item in items]
+    idem_context, replay = _begin_idempotent_request(
+        request,
+        path="/deliveries/bulk-update",
+        payload={
+            "deliveries": [item.model_dump(exclude_none=True) for item in items],
+            "action": "bulk_update_deliveries",
+        },
     )
-    errors = result.get("errors") or []
-    resp = ok_response(request, {"ok": len(errors) == 0, **result})
-    resp.headers["Cache-Control"] = "no-store"
-    return resp
+    if replay:
+        return _idempotent_replay_response(request, replay)
+
+    svc = DatabaseService()
+    try:
+        result = svc.bulk_update_deliveries_by_business_id(
+            [item.model_dump(exclude_none=True) for item in items]
+        )
+        errors = result.get("errors") or []
+        response_body = {"ok": len(errors) == 0, **result}
+        IdempotencyService.complete(idem_context, status_code=200, body=response_body)
+        resp = ok_response(request, response_body)
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
+    except Exception:
+        IdempotencyService.abandon(idem_context)
+        raise
 
 
 @router.delete("/deliveries/{delivery_id}")
