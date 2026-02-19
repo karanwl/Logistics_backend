@@ -855,12 +855,17 @@ class DatabaseService:
                 .where(PublishedPlan.plan_date == plan_dt, PublishedPlan.plan_type == normalized_type)
             )
             plan = session.execute(stmt).scalar_one_or_none()
+            now_utc = datetime.now(ZoneInfo("UTC"))
             if not plan:
                 plan = PublishedPlan(plan_date=plan_dt, plan_type=normalized_type)
+                if hasattr(plan, "created_at") and getattr(plan, "created_at", None) is None:
+                    plan.created_at = now_utc
                 session.add(plan)
             self._apply_plan_payload_fields(plan, fields)
+            if hasattr(plan, "created_at") and getattr(plan, "created_at", None) is None:
+                plan.created_at = now_utc
             if hasattr(plan, "updated_at"):
-                plan.updated_at = datetime.now(ZoneInfo("UTC"))
+                plan.updated_at = now_utc
             session.commit()
             session.refresh(plan)
             self._invalidate_cache(settings.PUBLISHED_PLANS_TABLE)
@@ -1360,6 +1365,12 @@ class DatabaseService:
                 plan_type = self._normalize_plan_type(fields.get(settings.PUBLISHED_PLANS_TYPE_FIELD), default="published")
                 plan = PublishedPlan(plan_date=plan_date, plan_type=plan_type)
                 self._apply_plan_fields(plan, fields)
+                now_utc = datetime.now(ZoneInfo("UTC"))
+                # Some deployments have NOT NULL timestamps without DB defaults.
+                if hasattr(plan, "created_at") and getattr(plan, "created_at", None) is None:
+                    plan.created_at = now_utc
+                if hasattr(plan, "updated_at") and getattr(plan, "updated_at", None) is None:
+                    plan.updated_at = now_utc
                 session.add(plan)
                 session.commit()
                 session.refresh(plan)
