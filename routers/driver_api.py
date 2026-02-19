@@ -843,7 +843,7 @@ def driver_push_test(payload: PushTestRequest, request: Request):
     tokens = tokens_for_identities(identities)
     result = send_push_notification(
         tokens=tokens,
-        title=(payload.title or "Citywide Logistics").strip() or "Citywide Logistics",
+        title=(payload.title or "DeliveryOS").strip() or "DeliveryOS",
         body=(payload.body or "Test push from server").strip() or "Test push from server",
         data={"kind": "test"},
     )

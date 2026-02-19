@@ -21,7 +21,7 @@ def _env_float(name: str, default: str) -> float:
 
 
 class Settings(BaseModel):
-    APP_NAME: str = os.getenv("APP_NAME", "Logistics Planner")
+    APP_NAME: str = os.getenv("APP_NAME", "DeliveryOS")
     APP_ENV: str = os.getenv("APP_ENV", "development")
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
     AUTH_DEBUG: bool = _env_bool("AUTH_DEBUG", "true")
