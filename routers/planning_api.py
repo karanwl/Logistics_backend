@@ -30,6 +30,7 @@ from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 from responses import ok_response
 from utils import business_date_iso, next_plan_date_iso, parse_iso_date, parse_photo_refs, parse_sales_order, to_int
+from routers.driver_api import _photo_urls_for_response
 
 router = APIRouter(dependencies=[Depends(csrf_protect)])
 logger = logging.getLogger(__name__)
@@ -207,7 +208,7 @@ def _delivery_detail_payload(svc: DatabaseService, rec: dict, fallback_delivery_
         "assigned_driver": str(fields.get(settings.DELIVERIES_DRIVER_FIELD) or "").strip() or None,
         "status": _status_field_value(fields) or None,
         "driver_notes": _driver_notes_value(fields),
-        "photo_urls": parse_photo_refs(fields.get(_delivery_photo_field_name())),
+        "photo_urls": _photo_urls_for_response(fields.get(_delivery_photo_field_name())),
         "status_updated_at": str(fields.get(settings.DELIVERIES_STATUS_UPDATED_FIELD) or "").strip() or None,
     }
 
