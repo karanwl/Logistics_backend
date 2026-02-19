@@ -87,6 +87,131 @@ def _delivery_photo_field_name() -> str:
     return str(settings.DELIVERIES_PHOTO_URLS_FIELD or "").strip() or "Photo URLs"
 
 
+def _require_authenticated_user(request: Request):
+    user = get_current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Login required.")
+    return user
+
+
+def _normalize_status(value: str | None) -> str:
+    raw = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    while "__" in raw:
+        raw = raw.replace("__", "_")
+    return raw.strip("_")
+
+
+def _status_field_value(fields: dict) -> str:
+    if settings.DELIVERIES_STATUS_FIELD:
+        status = str(fields.get(settings.DELIVERIES_STATUS_FIELD) or "").strip()
+        if status:
+            return status
+    status = str(fields.get("Status") or "").strip()
+    if status:
+        return status
+    notes = str(fields.get(settings.DELIVERIES_DRIVER_NOTES_FIELD) or "").strip()
+    if notes.lower().startswith("[status:"):
+        closing = notes.find("]")
+        if closing > 8:
+            candidate = notes[8:closing].strip()
+            return _normalize_status(candidate)
+    return ""
+
+
+def _driver_notes_value(fields: dict) -> str | None:
+    raw = str(fields.get(settings.DELIVERIES_DRIVER_NOTES_FIELD) or "").strip()
+    if not raw:
+        return None
+    if raw.lower().startswith("[status:"):
+        closing = raw.find("]")
+        if closing >= 0:
+            text = raw[closing + 1 :].strip()
+            return text or None
+    return raw
+
+
+def _as_int(value: object, default: int = 0) -> int:
+    if value is None:
+        return default
+    try:
+        return int(float(str(value).strip()))
+    except Exception:
+        return default
+
+
+def _as_float(value: object) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        return float(str(value).strip())
+    except Exception:
+        return None
+
+
+def _delivery_detail_payload(svc: DatabaseService, rec: dict, fallback_delivery_id: str) -> Dict[str, Any]:
+    fields = rec.get("fields", {})
+    job_ids = fields.get(settings.DELIVERIES_JOB_LINK_FIELD) or []
+    job_id = None
+    if isinstance(job_ids, list) and job_ids:
+        first = job_ids[0]
+        if first is not None and str(first).strip():
+            job_id = str(first).strip()
+
+    job_name = None
+    job_address = None
+    site_contact = None
+    site_contact_number = None
+    latitude = None
+    longitude = None
+    if job_id:
+        try:
+            jobsite = svc.get_record("Jobsites", job_id)
+            job_fields = jobsite.get("fields", {}) if isinstance(jobsite, dict) else {}
+            job_name = str(job_fields.get(settings.JOBSITES_NAME_FIELD) or "").strip() or None
+            job_address = str(job_fields.get(settings.JOBSITES_ADDRESS_FIELD) or "").strip() or None
+            site_contact = str(job_fields.get("Site Contact") or "").strip() or None
+            site_contact_number = str(job_fields.get("Site Contact Number") or "").strip() or None
+            latitude = _as_float(job_fields.get(settings.JOBSITES_LAT_FIELD))
+            longitude = _as_float(job_fields.get(settings.JOBSITES_LON_FIELD))
+        except Exception:
+            logger.warning(
+                "Failed to load jobsite for delivery_id=%s job_id=%s",
+                fallback_delivery_id,
+                job_id,
+                exc_info=True,
+            )
+
+    return {
+        "delivery_id": str(rec.get("id") or fallback_delivery_id),
+        "job_id": job_id,
+        "job_name": job_name,
+        "job_address": job_address,
+        "site_contact": site_contact,
+        "site_contact_number": site_contact_number,
+        "latitude": latitude,
+        "longitude": longitude,
+        "sales_order": str(fields.get(settings.DELIVERIES_SALES_ORDER_FIELD) or "").strip() or None,
+        "scheduled_date": str(fields.get("Scheduled Date") or "").strip() or None,
+        "window_start": str(fields.get("Window Start") or "").strip() or None,
+        "window_end": str(fields.get("Window End") or "").strip() or None,
+        "med_skid": _as_int(fields.get("Med Skid")),
+        "small_skid": _as_int(fields.get("Small Skid")),
+        "large_skid": _as_int(fields.get("Large Skid")),
+        "exp_frame": _as_int(fields.get("Exp Frame")),
+        "frame": _as_int(fields.get("Frame")),
+        "door": _as_int(fields.get("Door")),
+        "box": _as_int(fields.get("Box")),
+        "pickup": bool(fields.get("Pickup")),
+        "pickup_vehicle": str(fields.get(settings.DELIVERIES_PICKUP_VEHICLE_FIELD) or "").strip() or None,
+        "requires_empty_truck": bool(fields.get("Requires Empty Truck")),
+        "assigned_driver": str(fields.get(settings.DELIVERIES_DRIVER_FIELD) or "").strip() or None,
+        "status": _status_field_value(fields) or None,
+        "driver_notes": _driver_notes_value(fields),
+        "photo_urls": parse_photo_refs(fields.get(_delivery_photo_field_name())),
+        "status_updated_at": str(fields.get(settings.DELIVERIES_STATUS_UPDATED_FIELD) or "").strip() or None,
+    }
+
+
 @router.get("/me")
 def current_user(request: Request):
     user = get_current_user(request)
@@ -1562,6 +1687,21 @@ def users_update(record_id: str, payload: UserUpdateRequest, request: Request):
             raise HTTPException(status_code=404, detail="User not found.")
         updated = svc.update_record(settings.USERS_TABLE, rec.get("id"), fields)
     resp = ok_response(request, {"ok": True, "record": updated})
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@router.get("/deliveries/{delivery_id}/details")
+def delivery_detail_get(delivery_id: str, request: Request):
+    _require_authenticated_user(request)
+    if not delivery_id:
+        raise HTTPException(status_code=400, detail="Missing delivery id.")
+    svc = DatabaseService()
+    rec = svc.get_delivery_by_business_id(delivery_id)
+    if not rec:
+        raise HTTPException(status_code=404, detail="Delivery not found.")
+    payload = _delivery_detail_payload(svc, rec, delivery_id)
+    resp = ok_response(request, payload)
     resp.headers["Cache-Control"] = "no-store"
     return resp
 
