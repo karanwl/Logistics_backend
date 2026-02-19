@@ -9,7 +9,7 @@ primary_region = 'lax'
 [build]
 
 [deploy]
-  release_command = "alembic upgrade head"
+  release_command = "sh -lc 'cd /app && PYTHONPATH=/app .venv/bin/alembic upgrade head'"
 
 [http_service]
   internal_port = 8080

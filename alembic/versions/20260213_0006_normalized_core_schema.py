@@ -57,6 +57,16 @@ def _legacy_col_expr(columns: set[str], col_name: str, default_sql: str = "NULL"
     return default_sql
 
 
+def _first_existing_column(inspector, table_name: str, candidates: list[str]) -> str | None:
+    if not _has_table(inspector, table_name):
+        return None
+    cols = {col["name"] for col in inspector.get_columns(table_name)}
+    for candidate in candidates:
+        if candidate in cols:
+            return candidate
+    return None
+
+
 def upgrade():
     bind = op.get_bind()
     inspector = sa.inspect(bind)
@@ -167,6 +177,80 @@ def upgrade():
             sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.text("NOW()")),
             sa.PrimaryKeyConstraint("plan_date", "plan_type", name="published_plans_pkey"),
         )
+
+    # Ensure normalized columns exist when legacy tables are already present.
+    inspector = sa.inspect(bind)
+    if _has_table(inspector, "jobsites"):
+        op.execute(
+            """
+            ALTER TABLE jobsites
+              ADD COLUMN IF NOT EXISTS name text,
+              ADD COLUMN IF NOT EXISTS address text,
+              ADD COLUMN IF NOT EXISTS latitude double precision,
+              ADD COLUMN IF NOT EXISTS longitude double precision,
+              ADD COLUMN IF NOT EXISTS site_contact text,
+              ADD COLUMN IF NOT EXISTS site_contact_number text
+            """
+        )
+        if _has_column(inspector, "jobsites", "address_line1"):
+            op.execute(
+                """
+                UPDATE jobsites
+                SET address = COALESCE(NULLIF(btrim(address), ''), address_line1)
+                WHERE address IS NULL OR btrim(address) = ''
+                """
+            )
+
+    inspector = sa.inspect(bind)
+    if _has_table(inspector, "deliveries"):
+        op.execute(
+            """
+            ALTER TABLE deliveries
+              ADD COLUMN IF NOT EXISTS jobsite_id integer,
+              ADD COLUMN IF NOT EXISTS sales_order integer,
+              ADD COLUMN IF NOT EXISTS ps_delivered boolean DEFAULT FALSE,
+              ADD COLUMN IF NOT EXISTS scheduled_date date,
+              ADD COLUMN IF NOT EXISTS med_skid integer DEFAULT 0,
+              ADD COLUMN IF NOT EXISTS small_skid integer DEFAULT 0,
+              ADD COLUMN IF NOT EXISTS large_skid integer DEFAULT 0,
+              ADD COLUMN IF NOT EXISTS pickup boolean DEFAULT FALSE,
+              ADD COLUMN IF NOT EXISTS pickup_vehicle text,
+              ADD COLUMN IF NOT EXISTS requires_empty_truck boolean DEFAULT FALSE,
+              ADD COLUMN IF NOT EXISTS door integer DEFAULT 0,
+              ADD COLUMN IF NOT EXISTS frame integer DEFAULT 0,
+              ADD COLUMN IF NOT EXISTS exp_frame integer DEFAULT 0,
+              ADD COLUMN IF NOT EXISTS box integer DEFAULT 0,
+              ADD COLUMN IF NOT EXISTS driver_name text,
+              ADD COLUMN IF NOT EXISTS status text,
+              ADD COLUMN IF NOT EXISTS status_updated_at timestamptz,
+              ADD COLUMN IF NOT EXISTS arrived_at timestamptz,
+              ADD COLUMN IF NOT EXISTS delivered_at timestamptz,
+              ADD COLUMN IF NOT EXISTS driver_latitude double precision,
+              ADD COLUMN IF NOT EXISTS driver_longitude double precision,
+              ADD COLUMN IF NOT EXISTS driver_notes text,
+              ADD COLUMN IF NOT EXISTS window_start text,
+              ADD COLUMN IF NOT EXISTS window_end text,
+              ADD COLUMN IF NOT EXISTS packing_slip integer,
+              ADD COLUMN IF NOT EXISTS route_sequence integer
+            """
+        )
+        if _has_column(inspector, "deliveries", "job_id"):
+            op.execute(
+                """
+                UPDATE deliveries
+                SET jobsite_id = COALESCE(jobsite_id, job_id)
+                WHERE jobsite_id IS NULL AND job_id IS NOT NULL
+                """
+            )
+        if _has_column(inspector, "deliveries", "assigned_driver_id"):
+            op.execute(
+                """
+                UPDATE deliveries
+                SET driver_name = COALESCE(driver_name, assigned_driver_id::text)
+                WHERE (driver_name IS NULL OR btrim(driver_name) = '')
+                  AND assigned_driver_id IS NOT NULL
+                """
+            )
 
     inspector = sa.inspect(bind)
     if _has_table(inspector, "Users") and _has_table(inspector, "users"):
@@ -383,87 +467,115 @@ def upgrade():
         )
 
     # Align identity sequences after backfill.
-    if _has_table(sa.inspect(bind), "jobsites"):
+    inspector = sa.inspect(bind)
+    jobsites_pk_col = _first_existing_column(inspector, "jobsites", ["id", "jobsite_id"])
+    deliveries_pk_col = _first_existing_column(inspector, "deliveries", ["id", "delivery_id"])
+    if jobsites_pk_col:
         op.execute(
-            """
-            SELECT setval(
-                pg_get_serial_sequence('jobsites', 'id'),
-                COALESCE((SELECT MAX(id) FROM jobsites), 1),
-                TRUE
-            )
-            """
+            sa.text(
+                """
+                DO $$
+                DECLARE seq_name text;
+                BEGIN
+                  SELECT pg_get_serial_sequence('jobsites', :col_name) INTO seq_name;
+                  IF seq_name IS NOT NULL THEN
+                    EXECUTE format(
+                      'SELECT setval(%L, COALESCE((SELECT MAX(%I) FROM jobsites), 1), TRUE)',
+                      seq_name,
+                      :col_name
+                    );
+                  END IF;
+                END;
+                $$;
+                """
+            ).bindparams(sa.bindparam("col_name", jobsites_pk_col))
         )
-    if _has_table(sa.inspect(bind), "deliveries"):
+    if deliveries_pk_col:
         op.execute(
-            """
-            SELECT setval(
-                pg_get_serial_sequence('deliveries', 'id'),
-                COALESCE((SELECT MAX(id) FROM deliveries), 1),
-                TRUE
-            )
-            """
+            sa.text(
+                """
+                DO $$
+                DECLARE seq_name text;
+                BEGIN
+                  SELECT pg_get_serial_sequence('deliveries', :col_name) INTO seq_name;
+                  IF seq_name IS NOT NULL THEN
+                    EXECUTE format(
+                      'SELECT setval(%L, COALESCE((SELECT MAX(%I) FROM deliveries), 1), TRUE)',
+                      seq_name,
+                      :col_name
+                    );
+                  END IF;
+                END;
+                $$;
+                """
+            ).bindparams(sa.bindparam("col_name", deliveries_pk_col))
         )
 
     inspector = sa.inspect(bind)
     # Clean invalid references before enabling FK.
     if _has_table(inspector, "deliveries") and _has_table(inspector, "jobsites"):
-        op.execute(
-            """
-            UPDATE deliveries d
-            SET jobsite_id = NULL
-            WHERE d.jobsite_id IS NOT NULL
-              AND NOT EXISTS (
-                SELECT 1 FROM jobsites j WHERE j.id = d.jobsite_id
-              )
-            """
-        )
-        inspector = sa.inspect(bind)
-        if not _has_fk(inspector, "deliveries", ["jobsite_id"], "jobsites"):
-            op.create_foreign_key(
-                "fk_deliveries_jobsite_id",
-                source_table="deliveries",
-                referent_table="jobsites",
-                local_cols=["jobsite_id"],
-                remote_cols=["id"],
-                ondelete="SET NULL",
+        jobsites_pk_col = _first_existing_column(inspector, "jobsites", ["id", "jobsite_id"])
+        if jobsites_pk_col:
+            op.execute(
+                f"""
+                UPDATE deliveries d
+                SET jobsite_id = NULL
+                WHERE d.jobsite_id IS NOT NULL
+                  AND NOT EXISTS (
+                    SELECT 1 FROM jobsites j WHERE j.{jobsites_pk_col} = d.jobsite_id
+                  )
+                """
             )
+            inspector = sa.inspect(bind)
+            if not _has_fk(inspector, "deliveries", ["jobsite_id"], "jobsites"):
+                op.create_foreign_key(
+                    "fk_deliveries_jobsite_id",
+                    source_table="deliveries",
+                    referent_table="jobsites",
+                    local_cols=["jobsite_id"],
+                    remote_cols=[jobsites_pk_col],
+                    ondelete="SET NULL",
+                )
 
     inspector = sa.inspect(bind)
     if _has_table(inspector, "deliveries"):
-        if not _has_index(inspector, "deliveries", "ix_deliveries_scheduled_date") and not _index_name_exists(bind, "ix_deliveries_scheduled_date"):
+        if _has_column(inspector, "deliveries", "scheduled_date") and not _has_index(inspector, "deliveries", "ix_deliveries_scheduled_date") and not _index_name_exists(bind, "ix_deliveries_scheduled_date"):
             op.create_index("ix_deliveries_scheduled_date", "deliveries", ["scheduled_date"])
-        if not _has_index(inspector, "deliveries", "ix_deliveries_driver") and not _index_name_exists(bind, "ix_deliveries_driver"):
+        if _has_column(inspector, "deliveries", "driver_name") and not _has_index(inspector, "deliveries", "ix_deliveries_driver") and not _index_name_exists(bind, "ix_deliveries_driver"):
             op.create_index("ix_deliveries_driver", "deliveries", ["driver_name"])
-        if not _has_index(inspector, "deliveries", "ix_deliveries_job_id") and not _index_name_exists(bind, "ix_deliveries_job_id"):
+        if _has_column(inspector, "deliveries", "jobsite_id") and not _has_index(inspector, "deliveries", "ix_deliveries_job_id") and not _index_name_exists(bind, "ix_deliveries_job_id"):
             op.create_index("ix_deliveries_job_id", "deliveries", ["jobsite_id"])
-        if not _has_index(inspector, "deliveries", "ix_deliveries_route_sequence") and not _index_name_exists(bind, "ix_deliveries_route_sequence"):
+        if _has_column(inspector, "deliveries", "route_sequence") and not _has_index(inspector, "deliveries", "ix_deliveries_route_sequence") and not _index_name_exists(bind, "ix_deliveries_route_sequence"):
             op.create_index("ix_deliveries_route_sequence", "deliveries", ["route_sequence"])
-        if not _has_index(inspector, "deliveries", "ix_deliveries_scheduled_driver_sequence") and not _index_name_exists(bind, "ix_deliveries_scheduled_driver_sequence"):
+        if _has_column(inspector, "deliveries", "scheduled_date") and _has_column(inspector, "deliveries", "driver_name") and _has_column(inspector, "deliveries", "route_sequence") and not _has_index(inspector, "deliveries", "ix_deliveries_scheduled_driver_sequence") and not _index_name_exists(bind, "ix_deliveries_scheduled_driver_sequence"):
             op.create_index(
                 "ix_deliveries_scheduled_driver_sequence",
                 "deliveries",
                 ["scheduled_date", "driver_name", "route_sequence"],
             )
-        if not _has_index(inspector, "deliveries", "ix_deliveries_status") and not _index_name_exists(bind, "ix_deliveries_status"):
+        if _has_column(inspector, "deliveries", "status") and not _has_index(inspector, "deliveries", "ix_deliveries_status") and not _index_name_exists(bind, "ix_deliveries_status"):
             op.create_index("ix_deliveries_status", "deliveries", ["status"])
-        if not _has_index(inspector, "deliveries", "ix_deliveries_status_updated_at") and not _index_name_exists(bind, "ix_deliveries_status_updated_at"):
+        if _has_column(inspector, "deliveries", "status_updated_at") and not _has_index(inspector, "deliveries", "ix_deliveries_status_updated_at") and not _index_name_exists(bind, "ix_deliveries_status_updated_at"):
             op.create_index("ix_deliveries_status_updated_at", "deliveries", ["status_updated_at"])
 
+    inspector = sa.inspect(bind)
+    jobsites_pk_col = _first_existing_column(inspector, "jobsites", ["id", "jobsite_id"]) or "id"
+    deliveries_pk_col = _first_existing_column(inspector, "deliveries", ["id", "delivery_id"]) or "id"
     op.execute(
-        """
+        f"""
         CREATE OR REPLACE VIEW public.v_route_live AS
         WITH base AS (
             SELECT
                 d.scheduled_date AS live_date,
-                d.id::text AS delivery_id,
+                d.{deliveries_pk_col}::text AS delivery_id,
                 d.jobsite_id::text AS jobsite_id,
                 COALESCE(NULLIF(btrim(d.driver_name), ''), 'Unassigned') AS driver_name,
                 d.route_sequence AS route_sequence,
-                COALESCE(NULLIF(btrim(j.name), ''), 'Delivery ' || d.id::text) AS job_name,
+                COALESCE(NULLIF(btrim(j.name), ''), 'Delivery ' || d.{deliveries_pk_col}::text) AS job_name,
                 COALESCE(NULLIF(btrim(j.address), ''), '') AS job_address,
                 COALESCE(d.sales_order::text, '') AS sales_order,
                 COALESCE(d.packing_slip::text, '') AS packing_slip,
-                lower(replace(replace(COALESCE(NULLIF(btrim(d.status), ''), ''), '-', '_'), ' ', '_')) AS status_norm,
+                lower(replace(replace(COALESCE(NULLIF(btrim(d.status::text), ''), ''), '-', '_'), ' ', '_')) AS status_norm,
                 COALESCE(d.ps_delivered, FALSE) AS ps_delivered,
                 d.status_updated_at AS status_updated_at,
                 d.arrived_at AS arrived_at,
@@ -478,13 +590,13 @@ def upgrade():
                 COALESCE(d.exp_frame, 0) AS exp_frame,
                 COALESCE(d.box, 0) AS box,
                 COALESCE(d.pickup, FALSE) AS pickup,
-                COALESCE(d.pickup_vehicle, '') AS pickup_vehicle,
+                COALESCE(d.pickup_vehicle::text, '') AS pickup_vehicle,
                 COALESCE(d.requires_empty_truck, FALSE) AS requires_empty_truck,
-                COALESCE(d.window_start, '') AS window_start,
-                COALESCE(d.window_end, '') AS window_end,
-                COALESCE(d.driver_notes, '') AS delivery_notes
+                COALESCE(d.window_start::text, '') AS window_start,
+                COALESCE(d.window_end::text, '') AS window_end,
+                COALESCE(d.driver_notes::text, '') AS delivery_notes
             FROM deliveries d
-            LEFT JOIN jobsites j ON j.id = d.jobsite_id
+            LEFT JOIN jobsites j ON j.{jobsites_pk_col} = d.jobsite_id
         )
         SELECT
             live_date,
